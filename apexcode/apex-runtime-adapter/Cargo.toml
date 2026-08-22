@@ -1,0 +1,13 @@
+[package]
+name = "apex-runtime-adapter"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+description = "Opt-in pre-side-effect policy gate for the Codex runtime"
+publish = false
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+apex-policy = { path = "../apex-policy" }

@@ -46,6 +46,64 @@ async fn initialized_mcp(codex_home: &TempDir) -> Result<TestAppServer> {
     Ok(mcp)
 }
 
+#[cfg(feature = "apex-runtime-adapter")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn apex_adapter_allows_supported_read_before_existing_processor() -> Result<()> {
+    let codex_home = TempDir::new()?;
+    let file_path = codex_home.path().join("adapter-read.txt");
+    std::fs::write(&file_path, "adapter read")?;
+
+    let mut mcp = initialized_mcp(&codex_home).await?;
+    let request_id = mcp
+        .send_fs_read_file_request(codex_app_server_protocol::FsReadFileParams {
+            path: absolute_path(file_path),
+        })
+        .await?;
+    let response: FsReadFileResponse = to_response(
+        timeout(
+            DEFAULT_READ_TIMEOUT,
+            mcp.read_stream_until_response_message(RequestId::Integer(request_id)),
+        )
+        .await??,
+    )?;
+
+    assert_eq!(
+        response,
+        FsReadFileResponse {
+            data_base64: STANDARD.encode("adapter read"),
+        }
+    );
+    Ok(())
+}
+
+#[cfg(feature = "apex-runtime-adapter")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn apex_adapter_blocks_malformed_read_before_filesystem_processor() -> Result<()> {
+    let codex_home = TempDir::new()?;
+    let mut mcp = TestAppServer::builder()
+        .with_codex_home(codex_home.path())
+        .without_auto_env()
+        .with_env_overrides(&[(CODEX_EXEC_SERVER_URL_ENV_VAR, Some("none"))])
+        .build()
+        .await?;
+    timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
+
+    let oversized_name = "x".repeat(4096);
+    let request_id = mcp
+        .send_fs_read_file_request(codex_app_server_protocol::FsReadFileParams {
+            path: absolute_path(codex_home.path().join(oversized_name)),
+        })
+        .await?;
+    expect_error_message(
+        &mut mcp,
+        request_id,
+        "Apex runtime adapter blocked fs/readFile: Some(UnknownClassification)",
+    )
+    .await?;
+
+    Ok(())
+}
+
 async fn expect_error_message(
     mcp: &mut TestAppServer,
     request_id: i64,
