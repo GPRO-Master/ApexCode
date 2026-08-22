@@ -14,6 +14,9 @@ path = "src/main.rs"
 name = "logs_client"
 path = "src/bin/logs_client.rs"
 
+[features]
+apex-runtime-adapter = ["codex-app-server/apex-runtime-adapter"]
+
 [lib]
 name = "codex_cli"
 path = "src/lib.rs"
