@@ -14,6 +14,3 @@ apex-evidence = { path = "../apex-evidence" }
 apex-policy = { path = "../apex-policy" }
 apex-runtime-trust = { path = "../apex-runtime-trust" }
 apex-task-state = { path = "../apex-task-state" }
-
-[dev-dependencies]
-apex-runtime-trust = { path = "../apex-runtime-trust", features = ["test-support"] }

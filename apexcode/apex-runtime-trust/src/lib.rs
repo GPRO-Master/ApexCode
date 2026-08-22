@@ -352,8 +352,8 @@ pub struct RuntimeExecutionAuthority {
 }
 
 impl RuntimeExecutionAuthority {
-    #[cfg(any(test, feature = "test-support"))]
-    pub fn test_fixture(
+    #[cfg(test)]
+    fn test_fixture(
         source: &VerifiedSource,
         approved_check: impl Into<String>,
     ) -> Result<Self, TrustError> {

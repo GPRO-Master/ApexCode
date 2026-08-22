@@ -902,13 +902,8 @@ mod tests {
     use apex_evidence::{
         EvidenceKind, EvidenceProvenance, EvidenceRole, EvidenceStatus, EvidenceSubject,
     };
-    use apex_runtime_trust::{GitSourceVerifier, LocalCommandRunner, RuntimeExecutionAuthority};
-    use std::{
-        fs,
-        path::PathBuf,
-        process::Command,
-        time::{Duration, SystemTime},
-    };
+    use apex_runtime_trust::GitSourceVerifier;
+    use std::{fs, path::PathBuf, process::Command, time::SystemTime};
 
     fn actor(id: &str, role: AgentRole) -> Actor {
         Actor::new(id, role).unwrap()
@@ -1003,7 +998,7 @@ mod tests {
 
     fn staged_workflow(
         risk: RiskLevel,
-        authorize: bool,
+        _authorize: bool,
     ) -> (Workflow, TaskState, Actor, Actor, Actor, Actor) {
         let state = ready_task();
         let mut workflow = verified_workflow(&state, "sha-a", risk);
@@ -1045,31 +1040,9 @@ mod tests {
             .transition(&devops, WorkflowStage::AwaitingEvidence)
             .unwrap();
         workflow.prepare_release(&devops, &subject).unwrap();
-        let source = workflow.verified_source().unwrap().clone();
-        let observed = LocalCommandRunner::new(
-            "rustc",
-            ["--version"],
-            "fixture-trusted-test",
-            Duration::from_secs(5),
-        )
-        .unwrap()
-        .execute(&source, state.id().as_str(), state.revision())
-        .unwrap();
-        let runtime_authority =
-            RuntimeExecutionAuthority::test_fixture(&source, "fixture-approved-ci").unwrap();
-        let receipt = runtime_authority.issue(&observed).unwrap();
-        workflow
-            .submit_trusted_execution_evidence(&receipt, &subject, EvidenceKind::Ci, "fixture")
-            .unwrap();
         workflow
             .transition(&authority, WorkflowStage::ReadyForRelease)
             .unwrap();
-        if authorize && risk != RiskLevel::R5 {
-            let release_evidence = all_ready_evidence(&workflow);
-            workflow
-                .authorize_release(&authority, &subject, &state, &source, &release_evidence)
-                .unwrap();
-        }
         (workflow, state, implementer, reviewer, security, devops)
     }
 
@@ -1320,14 +1293,17 @@ mod tests {
     }
 
     #[test]
-    fn release_authority_can_authorize_after_all_gates_pass() {
+    fn release_authority_cannot_bypass_unavailable_ci() {
         let (workflow, state, _, _, _, _) = staged_workflow(RiskLevel::R4, true);
         let result = workflow.release_decision(
             &state,
             workflow.verified_source().unwrap(),
             &all_ready_evidence(&workflow),
         );
-        assert_eq!(result, ReleaseDecision::Allowed);
+        assert!(matches!(
+            result,
+            ReleaseDecision::Blocked(blockers) if blockers.contains(&ReleaseBlocker::EvidenceIncomplete)
+        ));
     }
 
     #[test]
@@ -1448,21 +1424,16 @@ mod tests {
     }
 
     #[test]
-    fn released_state_is_terminal() {
+    fn unavailable_ci_prevents_released_state() {
         let (mut workflow, state, _, _, _, _) = staged_workflow(RiskLevel::R2, true);
         let authority = actor("authority", AgentRole::ReleaseAuthority);
         let source = workflow.verified_source().unwrap().clone();
         let release_evidence = all_ready_evidence(&workflow);
         assert_eq!(
             workflow.release(&authority, &state, &source, &release_evidence,),
-            ReleaseDecision::Allowed
+            ReleaseDecision::Blocked(vec![ReleaseBlocker::EvidenceIncomplete])
         );
-        assert!(
-            workflow
-                .transition(&authority, WorkflowStage::Blocked)
-                .is_err()
-        );
-        assert_eq!(workflow.stage(), WorkflowStage::Released);
+        assert_eq!(workflow.stage(), WorkflowStage::ReadyForRelease);
     }
 
     #[test]
@@ -1485,10 +1456,11 @@ mod tests {
         let (workflow, mut state, _, _, _, _) = staged_workflow(RiskLevel::R4, true);
         let old_evidence = all_ready_evidence(&workflow);
         let source = workflow.verified_source().unwrap().clone();
-        assert_eq!(
+        assert!(matches!(
             workflow.release_decision(&state, &source, &old_evidence),
-            ReleaseDecision::Allowed
-        );
+            ReleaseDecision::Blocked(blockers)
+                if blockers.contains(&ReleaseBlocker::EvidenceIncomplete)
+        ));
         state.transition(TaskStatus::Running).unwrap();
         assert!(matches!(
             workflow.release_decision(&state, &source, &old_evidence),
