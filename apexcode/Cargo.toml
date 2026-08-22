@@ -1,0 +1,7 @@
+[workspace]
+members = [
+    "apex-policy",
+    "apex-task-state",
+    "apex-evidence",
+]
+resolver = "3"
