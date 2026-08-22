@@ -17,6 +17,7 @@ use crate::session::tests::make_session_and_context;
 use crate::tools::context::ExecCommandToolOutput;
 use crate::tools::context::ToolCallSource;
 use crate::tools::context::ToolInvocation;
+use crate::tools::context::ToolOutput;
 use crate::tools::context::ToolPayload;
 use crate::tools::hook_names::HookToolName;
 use crate::tools::registry::CoreToolRuntime;
@@ -213,6 +214,29 @@ async fn exec_command_rejects_login_when_selected_environment_disallows_it() {
         message,
         "login shell is disabled by config; omit `login` or set it to false."
     );
+}
+
+#[cfg(feature = "apex-runtime-adapter")]
+#[tokio::test]
+async fn exec_command_observer_preserves_normal_execution_result() {
+    let invocation = invocation_for_payload(
+        "exec_command",
+        "observer-exec-call",
+        ToolPayload::Function {
+            arguments: serde_json::json!({
+                "cmd": "echo APEX_EXEC_OBSERVER_EXECUTED",
+            })
+            .to_string(),
+        },
+    )
+    .await;
+
+    let output = ExecCommandHandler::default()
+        .handle(invocation)
+        .await
+        .expect("observation must not change normal exec behavior");
+
+    assert!(output.log_output().contains("APEX_EXEC_OBSERVER_EXECUTED"));
 }
 
 #[test]

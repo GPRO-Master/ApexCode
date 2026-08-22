@@ -353,6 +353,32 @@ impl ExecCommandHandler {
             }));
         }
 
+        // Apex v0.2a observes the fully resolved command at the last safe point
+        // before the existing process manager. The result is telemetry only:
+        // it cannot alter the command, cwd, permissions, approval, or outcome.
+        #[cfg(feature = "apex-runtime-adapter")]
+        {
+            let observation = apex_runtime_adapter::observe_exec_command(
+                &context.call_id,
+                &command,
+                cwd.to_string(),
+                shell_type.name(),
+            );
+            turn.session_telemetry.counter(
+                apex_runtime_adapter::EXEC_OBSERVATION_TOTAL_METRIC,
+                /*inc*/ 1,
+                &[],
+            );
+            turn.session_telemetry.counter(
+                apex_runtime_adapter::EXEC_OBSERVATION_CLASSIFICATION_METRIC,
+                /*inc*/ 1,
+                &[("classification", observation.classification().as_str())],
+            );
+            if apex_runtime_adapter::diagnostics_enabled() {
+                eprintln!("Apex exec observation: {}", observation.diagnostic_line());
+            }
+        }
+
         emit_unified_exec_tty_metric(&turn.session_telemetry, tty);
         match manager
             .exec_command(

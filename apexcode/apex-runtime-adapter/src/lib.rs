@@ -9,6 +9,20 @@ use apex_policy::PolicyDecision;
 use apex_policy::RiskLevel;
 use std::path::Path;
 
+mod exec_classifier;
+mod exec_observer;
+
+pub use exec_observer::EXEC_OBSERVATION_CLASSIFICATION_METRIC;
+pub use exec_observer::EXEC_OBSERVATION_DEBUG_ENV;
+pub use exec_observer::EXEC_OBSERVATION_TOTAL_METRIC;
+pub use exec_observer::ExecClassification;
+pub use exec_observer::ExecConfidence;
+pub use exec_observer::ExecExecutionMode;
+pub use exec_observer::ExecObservation;
+pub use exec_observer::ExecShellKind;
+pub use exec_observer::diagnostics_enabled;
+pub use exec_observer::observe_exec_command;
+
 const MAX_REQUEST_ID_BYTES: usize = 128;
 const MAX_PATH_BYTES: usize = 4096;
 

@@ -19,6 +19,12 @@ name = "codex_cli"
 path = "src/lib.rs"
 doctest = false
 
+[features]
+apex-runtime-adapter = [
+    "codex-app-server/apex-runtime-adapter",
+    "codex-core/apex-runtime-adapter",
+]
+
 [lints]
 workspace = true
 
