@@ -10,7 +10,8 @@ source SHA abc123
 
 EvidenceSubject {
     task_revision: 7,
-    source_revision: abc123
+    source_revision: abc123,
+    provenance: Verified
 }
 
         ↓ source changes
@@ -23,4 +24,7 @@ source SHA def456
 ALL evidence for revision 7 / abc123 is stale.
 ```
 
-An evidence gate must report that evidence as `Blocker::Stale`; it must not silently reuse the older proof.
+Raw caller-supplied subjects remain `Unverified` and cannot satisfy an
+authoritative gate. A trusted host verifier must explicitly produce the
+verified subject. When the source changes, all evidence for revision 7 /
+abc123 is stale and cannot be reused for revision 8 / def456.

@@ -3,24 +3,25 @@
 This fixture demonstrates exact subject binding and separation of duties without integrating with `codex-rs`.
 
 ```text
-Coding (Implementer)
+Coding actor A (Implementer)
         ↓ submits SHA A
-Tester (Tester)
+Tester actor B (Tester)
         ↓ submits test evidence for task revision N / SHA A
-Reviewer (Reviewer)
+Reviewer actor C (Reviewer)
         ↓ approves task revision N / SHA A
-Security / CSO (Security)
+Security / CSO actor D (Security)
         ↓ approves task revision N / SHA A
-DevOps (DevOps)
+DevOps actor E (DevOps)
         ↓ prepares the release for task revision N / SHA A
-ReleaseAuthority (ReleaseAuthority)
+ReleaseAuthority actor F (ReleaseAuthority)
         ↓ authorizes only after all exact gates pass
 
-Coding pushes SHA B.
+Coding actor A pushes SHA B.
 
-Every approval and evidence record bound to SHA A is stale for SHA B.
-DevOps cannot release SHA B until new evidence, review, and security approval
-are bound to task revision N+1 / SHA B, with a distinct ReleaseAuthority actor.
+Every approval, evidence record, and release authorization bound to SHA A is
+stale for SHA B. DevOps actor E cannot release SHA B until new evidence,
+review, security approval, and ReleaseAuthority authorization are bound to
+task revision N+1 / SHA B. All mandatory identities remain distinct.
 ```
 
 The orchestrator records each action with actor, role, task revision, and source revision. It does not rewrite evidence history.
