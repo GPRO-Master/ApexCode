@@ -38,11 +38,17 @@ pub struct Classification {
 
 impl Classification {
     pub fn known(risk: RiskLevel, reason: impl Into<String>) -> Self {
-        Self { risk: Some(risk), reason: reason.into() }
+        Self {
+            risk: Some(risk),
+            reason: reason.into(),
+        }
     }
 
     pub fn unknown(reason: impl Into<String>) -> Self {
-        Self { risk: None, reason: reason.into() }
+        Self {
+            risk: None,
+            reason: reason.into(),
+        }
     }
 
     pub const fn decision(&self) -> PolicyDecision {
@@ -65,18 +71,30 @@ mod tests {
 
     #[test]
     fn reversible_changes_require_evidence() {
-        assert_eq!(RiskLevel::R2.default_decision(), PolicyDecision::AllowWithEvidence);
+        assert_eq!(
+            RiskLevel::R2.default_decision(),
+            PolicyDecision::AllowWithEvidence
+        );
     }
 
     #[test]
     fn privileged_and_production_changes_require_approval() {
-        assert_eq!(RiskLevel::R3.default_decision(), PolicyDecision::RequireApproval);
-        assert_eq!(RiskLevel::R4.default_decision(), PolicyDecision::RequireApproval);
+        assert_eq!(
+            RiskLevel::R3.default_decision(),
+            PolicyDecision::RequireApproval
+        );
+        assert_eq!(
+            RiskLevel::R4.default_decision(),
+            PolicyDecision::RequireApproval
+        );
     }
 
     #[test]
     fn destructive_changes_are_denied_by_default() {
-        assert_eq!(RiskLevel::R5.default_decision(), PolicyDecision::DenyByDefault);
+        assert_eq!(
+            RiskLevel::R5.default_decision(),
+            PolicyDecision::DenyByDefault
+        );
     }
 
     #[test]
