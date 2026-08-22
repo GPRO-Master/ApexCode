@@ -1,9 +1,7 @@
 // Modified for ApexCode by GPRO-Master.
 // Licensed under Apache-2.0. See the repository LICENSE file.
 
-use serde::{Deserialize, Serialize};
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum RiskLevel {
     R0,
     R1,
@@ -13,7 +11,7 @@ pub enum RiskLevel {
     R5,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PolicyDecision {
     Allow,
     AllowWithEvidence,
@@ -32,7 +30,7 @@ impl RiskLevel {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Classification {
     pub risk: Option<RiskLevel>,
     pub reason: String,
