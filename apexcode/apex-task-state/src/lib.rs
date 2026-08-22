@@ -12,6 +12,7 @@ pub enum TaskStateError {
     EmptyTaskId,
     EmptyObjective,
     RevisionOverflow,
+    InvalidRevision { status: TaskStatus, revision: u64 },
 }
 
 impl fmt::Display for TaskStateError {
@@ -20,6 +21,12 @@ impl fmt::Display for TaskStateError {
             Self::EmptyTaskId => formatter.write_str("task id must not be empty"),
             Self::EmptyObjective => formatter.write_str("objective must not be empty"),
             Self::RevisionOverflow => formatter.write_str("task revision cannot be incremented"),
+            Self::InvalidRevision { status, revision } => {
+                write!(
+                    formatter,
+                    "revision {revision} is invalid for task status {status:?}"
+                )
+            }
         }
     }
 }
@@ -108,20 +115,20 @@ impl std::error::Error for TransitionError {}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Checkpoint {
-    pub id: TaskId,
-    pub objective: String,
-    pub constraints: Vec<String>,
-    pub status: TaskStatus,
-    pub revision: u64,
+    id: TaskId,
+    objective: String,
+    constraints: Vec<String>,
+    status: TaskStatus,
+    revision: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TaskState {
-    pub id: TaskId,
-    pub objective: String,
-    pub constraints: Vec<String>,
-    pub status: TaskStatus,
-    pub revision: u64,
+    id: TaskId,
+    objective: String,
+    constraints: Vec<String>,
+    status: TaskStatus,
+    revision: u64,
 }
 
 impl TaskState {
@@ -142,6 +149,42 @@ impl TaskState {
             status: TaskStatus::Planned,
             revision: 0,
         })
+    }
+
+    pub fn id(&self) -> &TaskId {
+        &self.id
+    }
+
+    pub fn objective(&self) -> &str {
+        &self.objective
+    }
+
+    pub fn constraints(&self) -> &[String] {
+        &self.constraints
+    }
+
+    pub const fn status(&self) -> TaskStatus {
+        self.status
+    }
+
+    pub const fn revision(&self) -> u64 {
+        self.revision
+    }
+
+    pub fn validate(&self) -> Result<(), TaskStateError> {
+        if self.id.as_str().is_empty() {
+            return Err(TaskStateError::EmptyTaskId);
+        }
+        if self.objective.is_empty() {
+            return Err(TaskStateError::EmptyObjective);
+        }
+        if self.revision < minimum_revision(self.status) {
+            return Err(TaskStateError::InvalidRevision {
+                status: self.status,
+                revision: self.revision,
+            });
+        }
+        Ok(())
     }
 
     pub fn transition(&mut self, next: TaskStatus) -> Result<(), TransitionError> {
@@ -178,13 +221,15 @@ impl TaskState {
         if checkpoint.objective.is_empty() {
             return Err(TaskStateError::EmptyObjective);
         }
-        Ok(Self {
+        let state = Self {
             id: checkpoint.id,
             objective: checkpoint.objective,
             constraints: checkpoint.constraints,
             status: checkpoint.status,
             revision: checkpoint.revision,
-        })
+        };
+        state.validate()?;
+        Ok(state)
     }
 
     pub fn encode_snapshot(&self) -> Vec<u8> {
@@ -193,6 +238,18 @@ impl TaskState {
 
     pub fn decode_snapshot(bytes: &[u8]) -> Result<Self, SnapshotError> {
         decode_snapshot(bytes)
+    }
+}
+
+const fn minimum_revision(status: TaskStatus) -> u64 {
+    match status {
+        TaskStatus::Planned => 0,
+        TaskStatus::Running => 1,
+        TaskStatus::Blocked => 2,
+        TaskStatus::AwaitingEvidence => 2,
+        TaskStatus::ReadyForReview => 3,
+        TaskStatus::Completed => 4,
+        TaskStatus::Cancelled => 1,
     }
 }
 
@@ -382,8 +439,8 @@ mod tests {
     fn valid_transition_increments_revision() {
         let mut state = task();
         state.transition(TaskStatus::Running).unwrap();
-        assert_eq!(state.status, TaskStatus::Running);
-        assert_eq!(state.revision, 1);
+        assert_eq!(state.status(), TaskStatus::Running);
+        assert_eq!(state.revision(), 1);
     }
 
     #[test]
@@ -406,8 +463,8 @@ mod tests {
         state.transition(TaskStatus::Running).unwrap();
         state.transition(TaskStatus::Blocked).unwrap();
         state.transition(TaskStatus::Running).unwrap();
-        assert_eq!(state.revision, 3);
-        assert_eq!(state.status, TaskStatus::Running);
+        assert_eq!(state.revision(), 3);
+        assert_eq!(state.status(), TaskStatus::Running);
     }
 
     #[test]
@@ -438,6 +495,23 @@ mod tests {
         state.transition(TaskStatus::AwaitingEvidence).unwrap();
         let restored = TaskState::from_checkpoint(state.checkpoint()).unwrap();
         assert_eq!(restored, state);
+    }
+
+    #[test]
+    fn invalid_checkpoint_revision_is_rejected() {
+        assert_eq!(
+            TaskState::from_checkpoint(Checkpoint {
+                id: TaskId::new("task-1").unwrap(),
+                objective: "objective".into(),
+                constraints: vec![],
+                status: TaskStatus::ReadyForReview,
+                revision: 0,
+            }),
+            Err(TaskStateError::InvalidRevision {
+                status: TaskStatus::ReadyForReview,
+                revision: 0,
+            })
+        );
     }
 
     #[test]
