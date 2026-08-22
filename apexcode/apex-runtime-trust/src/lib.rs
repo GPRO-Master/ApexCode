@@ -179,10 +179,11 @@ impl GitSourceVerifier {
         }
         let canonical_root =
             std::fs::canonicalize(repository_root).map_err(|_| TrustError::RepositoryNotFound)?;
-        let git_root = self.git(repository_root, &["rev-parse", "--show-toplevel"])?;
-        let git_root =
-            std::fs::canonicalize(git_root.trim()).map_err(|_| TrustError::NotGitRepository)?;
-        if git_root != canonical_root {
+        let git_prefix = self.git(repository_root, &["rev-parse", "--show-prefix"])?;
+        if git_prefix
+            .bytes()
+            .any(|byte| byte != b'\r' && byte != b'\n')
+        {
             return Err(TrustError::NotGitRepository);
         }
         let actual_sha = self.git(repository_root, &["rev-parse", "HEAD"])?;
@@ -196,10 +197,23 @@ impl GitSourceVerifier {
         if !self
             .git(
                 repository_root,
-                &["status", "--porcelain", "--untracked-files=all"],
+                &[
+                    "status",
+                    "--porcelain",
+                    "--untracked-files=all",
+                    "--ignored=matching",
+                    "--ignore-submodules=none",
+                ],
             )?
             .trim()
             .is_empty()
+        {
+            return Err(TrustError::DirtyWorktree);
+        }
+        if self
+            .git(repository_root, &["ls-files", "-v"])?
+            .lines()
+            .any(|line| line.chars().next().is_some_and(|flag| flag != 'H'))
         {
             return Err(TrustError::DirtyWorktree);
         }
@@ -219,7 +233,7 @@ impl GitSourceVerifier {
             .output()
             .map_err(|error| TrustError::GitCommandFailed(error.to_string()))?;
         if !output.status.success() {
-            return if args == ["rev-parse", "--show-toplevel"] {
+            return if args.first() == Some(&"rev-parse") {
                 Err(TrustError::NotGitRepository)
             } else {
                 Err(TrustError::GitCommandFailed(
@@ -443,6 +457,9 @@ impl LocalCommandRunner {
         if !source.is_current() {
             return Err(TrustError::SourceNotCurrent);
         }
+        let deadline = Instant::now()
+            .checked_add(self.timeout)
+            .ok_or(TrustError::Timeout)?;
         let mut child = Command::new(&self.program)
             .args(&self.args)
             .current_dir(source.repository_root())
@@ -451,25 +468,30 @@ impl LocalCommandRunner {
             .stderr(Stdio::null())
             .spawn()
             .map_err(|error| TrustError::ExecutionFailed(error.to_string()))?;
-        let deadline = Instant::now() + self.timeout;
         let (outcome, exit_code) = loop {
-            if let Some(status) = child
-                .try_wait()
-                .map_err(|error| TrustError::ExecutionFailed(error.to_string()))?
-            {
-                let outcome = if status.success() {
-                    ExecutionOutcome::Pass
-                } else {
-                    ExecutionOutcome::Fail
-                };
-                break (outcome, status.code());
-            }
             if Instant::now() >= deadline {
-                child
-                    .kill()
-                    .map_err(|error| TrustError::ExecutionFailed(error.to_string()))?;
+                if let Err(error) = child.kill() {
+                    let _ = child.wait();
+                    return Err(TrustError::ExecutionFailed(error.to_string()));
+                }
                 let _ = child.wait();
                 break (ExecutionOutcome::Unavailable, None);
+            }
+            match child.try_wait() {
+                Ok(Some(status)) => {
+                    let outcome = if status.success() {
+                        ExecutionOutcome::Pass
+                    } else {
+                        ExecutionOutcome::Fail
+                    };
+                    break (outcome, status.code());
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err(TrustError::ExecutionFailed(error.to_string()));
+                }
             }
             thread::sleep(Duration::from_millis(10));
         };
@@ -563,6 +585,65 @@ mod tests {
             GitSourceVerifier::new().verify_repository(&root, "task-1", 7, &head),
             Err(TrustError::HeadMismatch { .. })
         ));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn ignored_files_and_hidden_index_flags_fail_verification() {
+        let (root, _head) = fixture_repo();
+        fs::write(root.join(".gitignore"), ".env\n").unwrap();
+        run_git(&root, &["add", ".gitignore"]);
+        run_git(&root, &["commit", "-qm", "ignore fixture"]);
+        fs::write(root.join(".env"), "secret").unwrap();
+        let current_head = run_git(&root, &["rev-parse", "HEAD"]);
+        assert_eq!(
+            GitSourceVerifier::new().verify_repository(&root, "task-1", 7, &current_head),
+            Err(TrustError::DirtyWorktree)
+        );
+
+        fs::remove_file(root.join(".env")).unwrap();
+        run_git(&root, &["update-index", "--skip-worktree", "fixture.txt"]);
+        assert_eq!(
+            GitSourceVerifier::new().verify_repository(&root, "task-1", 7, current_head),
+            Err(TrustError::DirtyWorktree)
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn timeout_overflow_is_rejected_before_spawn() {
+        let (root, head) = fixture_repo();
+        let source = GitSourceVerifier::new()
+            .verify_repository(&root, "task-1", 7, &head)
+            .unwrap();
+        let runner =
+            LocalCommandRunner::new("rustc", ["--version"], "overflow", Duration::MAX).unwrap();
+        assert_eq!(
+            runner.execute(&source, "task-1", 7),
+            Err(TrustError::Timeout)
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn command_finishing_after_deadline_is_unavailable() {
+        let (root, head) = fixture_repo();
+        let source = GitSourceVerifier::new()
+            .verify_repository(&root, "task-1", 7, &head)
+            .unwrap();
+        let (program, args) = if cfg!(windows) {
+            (
+                "cmd.exe",
+                vec!["/C", "ping", "127.0.0.1", "-n", "3", ">", "NUL"],
+            )
+        } else {
+            ("sh", vec!["-c", "sleep 1"])
+        };
+        let observed = LocalCommandRunner::new(program, args, "deadline", Duration::from_millis(1))
+            .unwrap()
+            .execute(&source, "task-1", 7)
+            .unwrap();
+        assert_eq!(observed.outcome(), ExecutionOutcome::Unavailable);
         fs::remove_dir_all(root).unwrap();
     }
 

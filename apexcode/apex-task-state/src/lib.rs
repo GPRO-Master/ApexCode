@@ -17,6 +17,7 @@ pub enum TaskStateError {
     EmptyTaskId,
     EmptyObjective,
     RevisionOverflow,
+    InvalidTransition { from: TaskStatus, to: TaskStatus },
     InvalidRevision { status: TaskStatus, revision: u64 },
 }
 
@@ -26,6 +27,9 @@ impl fmt::Display for TaskStateError {
             Self::EmptyTaskId => formatter.write_str("task id must not be empty"),
             Self::EmptyObjective => formatter.write_str("objective must not be empty"),
             Self::RevisionOverflow => formatter.write_str("task revision cannot be incremented"),
+            Self::InvalidTransition { from, to } => {
+                write!(formatter, "invalid task transition: {from:?} -> {to:?}")
+            }
             Self::InvalidRevision { status, revision } => {
                 write!(
                     formatter,
@@ -100,24 +104,6 @@ impl TaskStatus {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct TransitionError {
-    pub from: TaskStatus,
-    pub to: TaskStatus,
-}
-
-impl fmt::Display for TransitionError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            formatter,
-            "invalid task transition: {:?} -> {:?}",
-            self.from, self.to
-        )
-    }
-}
-
-impl std::error::Error for TransitionError {}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Checkpoint {
     id: TaskId,
@@ -180,18 +166,18 @@ impl TaskState {
         validate_checkpoint(&self.checkpoint())
     }
 
-    pub fn transition(&mut self, next: TaskStatus) -> Result<(), TransitionError> {
+    pub fn transition(&mut self, next: TaskStatus) -> Result<(), TaskStateError> {
         if !self.status.can_transition_to(next) {
-            return Err(TransitionError {
+            return Err(TaskStateError::InvalidTransition {
                 from: self.status,
                 to: next,
             });
         }
 
-        let revision = self.revision.checked_add(1).ok_or(TransitionError {
-            from: self.status,
-            to: next,
-        })?;
+        let revision = self
+            .revision
+            .checked_add(1)
+            .ok_or(TaskStateError::RevisionOverflow)?;
         self.status = next;
         self.revision = revision;
         Ok(())
@@ -247,6 +233,10 @@ const fn minimum_revision(status: TaskStatus) -> u64 {
         TaskStatus::Cancelled => 1,
     }
 }
+
+const MAX_SNAPSHOT_BYTES: usize = 1024 * 1024;
+const MAX_CONSTRAINTS: usize = 1024;
+const SNAPSHOT_TRAILER_BYTES: usize = 1 + std::mem::size_of::<u64>();
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SnapshotError {
@@ -328,6 +318,9 @@ impl SnapshotAuthenticator {
 
 impl SnapshotCandidate {
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, SnapshotError> {
+        if bytes.len() > MAX_SNAPSHOT_BYTES {
+            return Err(SnapshotError::InvalidFormat);
+        }
         let mut reader = Reader { bytes, position: 0 };
         if reader.take(SNAPSHOT_MAGIC.len()) != Some(SNAPSHOT_MAGIC) {
             return Err(SnapshotError::InvalidFormat);
@@ -355,7 +348,14 @@ impl SnapshotCandidate {
         let id = TaskId::new(payload_reader.string()?).map_err(SnapshotError::InvalidState)?;
         let objective = payload_reader.string()?;
         let constraint_count = payload_reader.u32().ok_or(SnapshotError::InvalidFormat)? as usize;
-        if constraint_count > payload_reader.remaining() {
+        let minimum_constraints_bytes = constraint_count
+            .checked_mul(std::mem::size_of::<u32>())
+            .ok_or(SnapshotError::InvalidFormat)?;
+        if constraint_count > MAX_CONSTRAINTS
+            || minimum_constraints_bytes
+                .checked_add(SNAPSHOT_TRAILER_BYTES)
+                .is_none_or(|required| required > payload_reader.remaining())
+        {
             return Err(SnapshotError::InvalidFormat);
         }
         let mut constraints = Vec::with_capacity(constraint_count);
@@ -402,10 +402,6 @@ impl TaskState {
         Self::from_checkpoint_inner(verified.checkpoint)
     }
 
-    pub fn encode_snapshot(&self) -> Vec<u8> {
-        encode_snapshot_payload(&self.checkpoint(), None)
-    }
-
     pub fn encode_authenticated_snapshot(&self, authenticator: &SnapshotAuthenticator) -> Vec<u8> {
         encode_snapshot_payload(&self.checkpoint(), Some(authenticator))
     }
@@ -413,10 +409,6 @@ impl TaskState {
     pub fn decode_snapshot(bytes: &[u8]) -> Result<SnapshotCandidate, SnapshotError> {
         SnapshotCandidate::from_bytes(bytes)
     }
-}
-
-pub fn encode_snapshot(state: &TaskState) -> Vec<u8> {
-    state.encode_snapshot()
 }
 
 pub fn encode_authenticated_snapshot(
@@ -575,10 +567,22 @@ mod tests {
         let original = state.clone();
         assert_eq!(
             state.transition(TaskStatus::Completed),
-            Err(TransitionError {
+            Err(TaskStateError::InvalidTransition {
                 from: TaskStatus::Planned,
                 to: TaskStatus::Completed
             })
+        );
+        assert_eq!(state, original);
+    }
+
+    #[test]
+    fn revision_overflow_is_reported_without_mutating_state() {
+        let mut state = task();
+        state.revision = u64::MAX;
+        let original = state.clone();
+        assert_eq!(
+            state.transition(TaskStatus::Running),
+            Err(TaskStateError::RevisionOverflow)
         );
         assert_eq!(state, original);
     }
@@ -676,8 +680,29 @@ mod tests {
     }
 
     #[test]
+    fn oversized_constraint_count_is_rejected_before_allocation() {
+        let mut payload = Vec::new();
+        put_string(&mut payload, "task-1");
+        put_string(&mut payload, "objective");
+        payload.extend_from_slice(&(MAX_CONSTRAINTS as u32 + 1).to_le_bytes());
+        payload.push(status_to_byte(TaskStatus::Planned));
+        payload.extend_from_slice(&0u64.to_le_bytes());
+
+        let mut encoded = Vec::new();
+        encoded.extend_from_slice(SNAPSHOT_MAGIC);
+        encoded.extend_from_slice(&SNAPSHOT_VERSION.to_le_bytes());
+        encoded.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+        encoded.extend_from_slice(&payload);
+
+        assert_eq!(
+            SnapshotCandidate::from_bytes(&encoded),
+            Err(SnapshotError::InvalidFormat)
+        );
+    }
+
+    #[test]
     fn unsupported_snapshot_version_fails() {
-        let mut encoded = task().encode_snapshot();
+        let mut encoded = encode_snapshot_payload(&task().checkpoint(), None);
         encoded[SNAPSHOT_MAGIC.len()] = 3;
         assert_eq!(
             TaskState::decode_snapshot(&encoded),
@@ -726,7 +751,9 @@ mod tests {
             Err(SnapshotError::AuthenticationFailed)
         );
 
-        let unsigned = SnapshotCandidate::from_bytes(&state.encode_snapshot()).unwrap();
+        let unsigned =
+            SnapshotCandidate::from_bytes(&encode_snapshot_payload(&state.checkpoint(), None))
+                .unwrap();
         assert_eq!(
             authenticator.authenticate(&unsigned),
             Err(SnapshotError::AuthenticationFailed)

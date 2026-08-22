@@ -684,6 +684,10 @@ impl Workflow {
         }
         if task_state.id().as_str() != source.task_id()
             || task_state.revision() != source.task_revision()
+            || task_state.id().as_str() != self.subject.task_id()
+            || task_state.revision() != self.subject.task_revision()
+            || source.task_id() != self.subject.task_id()
+            || source.task_revision() != self.subject.task_revision()
             || source.source_revision() != self.subject.source_revision()
             || !source.is_current()
         {
@@ -1289,6 +1293,24 @@ mod tests {
             workflow.release_decision(&state, &source, &[]),
             ReleaseDecision::Blocked(blockers)
                 if blockers.contains(&ReleaseBlocker::ProvenanceRequired)
+        ));
+    }
+
+    #[test]
+    fn release_inputs_must_match_workflow_subject() {
+        let state = ready_task();
+        let source = verified_source("task-2", state.revision(), "subject-binding");
+        let workflow = Workflow::new(
+            state.id().to_string(),
+            state.revision(),
+            source.source_revision(),
+            RiskLevel::R4,
+        )
+        .unwrap();
+        assert!(matches!(
+            workflow.release_decision(&state, &source, &[]),
+            ReleaseDecision::Blocked(blockers)
+                if blockers.contains(&ReleaseBlocker::SourceRevisionMismatch)
         ));
     }
 
