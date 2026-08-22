@@ -22,9 +22,35 @@ pub enum EvidenceStatus {
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct EvidenceSubject {
-    pub task_id: String,
-    pub task_revision: u64,
-    pub source_revision: String,
+    task_id: String,
+    task_revision: u64,
+    source_revision: String,
+    provenance: SubjectProvenance,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum SubjectProvenance {
+    Unverified,
+    Verified,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum EvidenceRole {
+    Tester,
+    Ci,
+    Security,
+    Reviewer,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EvidenceProvenance {
+    Unverified,
+    Actor { id: String, role: EvidenceRole },
+    TrustedSystem { id: String, role: EvidenceRole },
+}
+
+pub trait SourceVerifier {
+    fn verify(&self, task_id: &str, task_revision: u64, source_revision: &str) -> bool;
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -32,6 +58,7 @@ pub enum EvidenceError {
     EmptyTaskId,
     EmptySourceRevision,
     EmptyRequirements,
+    VerificationFailed,
 }
 
 impl fmt::Display for EvidenceError {
@@ -43,6 +70,9 @@ impl fmt::Display for EvidenceError {
             }
             Self::EmptyRequirements => {
                 formatter.write_str("evidence requirements must not be empty")
+            }
+            Self::VerificationFailed => {
+                formatter.write_str("source revision provenance could not be verified")
             }
         }
     }
@@ -60,9 +90,34 @@ impl EvidenceSubject {
             task_id: task_id.into(),
             task_revision,
             source_revision: source_revision.into(),
+            provenance: SubjectProvenance::Unverified,
         };
         subject.validate()?;
         Ok(subject)
+    }
+
+    pub fn verify_with<V: SourceVerifier>(mut self, verifier: &V) -> Result<Self, EvidenceError> {
+        if !verifier.verify(&self.task_id, self.task_revision, &self.source_revision) {
+            return Err(EvidenceError::VerificationFailed);
+        }
+        self.provenance = SubjectProvenance::Verified;
+        Ok(self)
+    }
+
+    pub fn task_id(&self) -> &str {
+        &self.task_id
+    }
+
+    pub const fn task_revision(&self) -> u64 {
+        self.task_revision
+    }
+
+    pub fn source_revision(&self) -> &str {
+        &self.source_revision
+    }
+
+    pub const fn is_verified(&self) -> bool {
+        matches!(self.provenance, SubjectProvenance::Verified)
     }
 
     fn validate(&self) -> Result<(), EvidenceError> {
@@ -78,10 +133,11 @@ impl EvidenceSubject {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EvidenceRecord {
-    pub kind: EvidenceKind,
-    pub status: EvidenceStatus,
-    pub subject: EvidenceSubject,
-    pub detail: String,
+    kind: EvidenceKind,
+    status: EvidenceStatus,
+    subject: EvidenceSubject,
+    detail: String,
+    provenance: EvidenceProvenance,
 }
 
 impl EvidenceRecord {
@@ -97,14 +153,69 @@ impl EvidenceRecord {
             status,
             subject,
             detail: detail.into(),
+            provenance: EvidenceProvenance::Unverified,
         })
+    }
+
+    pub fn with_provenance(
+        kind: EvidenceKind,
+        status: EvidenceStatus,
+        subject: EvidenceSubject,
+        detail: impl Into<String>,
+        provenance: EvidenceProvenance,
+    ) -> Result<Self, EvidenceError> {
+        subject.validate()?;
+        if let EvidenceProvenance::Actor { id, .. } | EvidenceProvenance::TrustedSystem { id, .. } =
+            &provenance
+            && id.is_empty()
+        {
+            return Err(EvidenceError::EmptyTaskId);
+        }
+        Ok(Self {
+            kind,
+            status,
+            subject,
+            detail: detail.into(),
+            provenance,
+        })
+    }
+
+    pub const fn kind(&self) -> EvidenceKind {
+        self.kind
+    }
+
+    pub const fn status(&self) -> EvidenceStatus {
+        self.status
+    }
+
+    pub fn subject(&self) -> &EvidenceSubject {
+        &self.subject
+    }
+
+    pub fn provenance(&self) -> &EvidenceProvenance {
+        &self.provenance
+    }
+
+    fn is_authoritative_for(&self, kind: EvidenceKind) -> bool {
+        let required_role = match kind {
+            EvidenceKind::Test => EvidenceRole::Tester,
+            EvidenceKind::Ci => EvidenceRole::Ci,
+            EvidenceKind::Security => EvidenceRole::Security,
+            EvidenceKind::Review => EvidenceRole::Reviewer,
+            EvidenceKind::Browser | EvidenceKind::Release => return false,
+        };
+        match &self.provenance {
+            EvidenceProvenance::Actor { role, .. }
+            | EvidenceProvenance::TrustedSystem { role, .. } => *role == required_role,
+            EvidenceProvenance::Unverified => false,
+        }
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EvidenceGate {
-    pub expected_subject: EvidenceSubject,
-    pub required_kinds: Vec<EvidenceKind>,
+    expected_subject: EvidenceSubject,
+    required_kinds: Vec<EvidenceKind>,
 }
 
 impl EvidenceGate {
@@ -128,6 +239,14 @@ impl EvidenceGate {
         })
     }
 
+    pub fn expected_subject(&self) -> &EvidenceSubject {
+        &self.expected_subject
+    }
+
+    pub fn required_kinds(&self) -> &[EvidenceKind] {
+        &self.required_kinds
+    }
+
     pub fn for_claim(
         expected_subject: EvidenceSubject,
         claim: CompletionClaim,
@@ -141,36 +260,50 @@ impl EvidenceGate {
     pub fn evaluate(&self, evidence: &[EvidenceRecord]) -> GateResult {
         let mut blockers = Vec::new();
 
+        if !self.expected_subject.is_verified() {
+            return GateResult::Blocked(vec![Blocker::ProvenanceRequired]);
+        }
+
         for &kind in &self.required_kinds {
             let matching_kind = evidence.iter().filter(|record| record.kind == kind);
             let mut exact = Vec::new();
+            let mut stale = Vec::new();
             for record in matching_kind {
                 if record.subject == self.expected_subject {
                     exact.push(record);
                 } else {
-                    blockers.push(Blocker::Stale {
-                        kind,
-                        subject: record.subject.clone(),
-                    });
+                    stale.push(record);
                 }
             }
 
             if exact
+                .iter()
+                .any(|record| !record.is_authoritative_for(kind))
+            {
+                blockers.push(Blocker::ProvenanceRequired);
+            } else if exact
                 .iter()
                 .any(|record| record.status == EvidenceStatus::Fail)
             {
                 blockers.push(Blocker::Failed(kind));
             } else if exact
                 .iter()
-                .any(|record| record.status == EvidenceStatus::Pass)
-            {
-                continue;
-            } else if exact
-                .iter()
                 .any(|record| record.status == EvidenceStatus::Unavailable)
             {
                 blockers.push(Blocker::Unavailable(kind));
-            } else if !evidence.iter().any(|record| record.kind == kind) {
+            } else if exact
+                .iter()
+                .any(|record| record.status == EvidenceStatus::Pass)
+            {
+                continue;
+            } else if !stale.is_empty() {
+                for record in stale {
+                    blockers.push(Blocker::Stale {
+                        kind,
+                        subject: record.subject.clone(),
+                    });
+                }
+            } else {
                 blockers.push(Blocker::Missing(kind));
             }
         }
@@ -215,6 +348,7 @@ pub enum Blocker {
     Missing(EvidenceKind),
     Failed(EvidenceKind),
     Unavailable(EvidenceKind),
+    ProvenanceRequired,
     Stale {
         kind: EvidenceKind,
         subject: EvidenceSubject,
@@ -237,8 +371,19 @@ impl GateResult {
 mod tests {
     use super::*;
 
+    struct FixtureVerifier;
+
+    impl SourceVerifier for FixtureVerifier {
+        fn verify(&self, _task_id: &str, _task_revision: u64, _source_revision: &str) -> bool {
+            true
+        }
+    }
+
     fn subject(task_id: &str, revision: u64, source: &str) -> EvidenceSubject {
-        EvidenceSubject::new(task_id, revision, source).unwrap()
+        EvidenceSubject::new(task_id, revision, source)
+            .unwrap()
+            .verify_with(&FixtureVerifier)
+            .unwrap()
     }
 
     fn record(
@@ -246,7 +391,27 @@ mod tests {
         status: EvidenceStatus,
         expected: &EvidenceSubject,
     ) -> EvidenceRecord {
-        EvidenceRecord::new(kind, status, expected.clone(), "fixture").unwrap()
+        let provenance = match kind {
+            EvidenceKind::Test => EvidenceProvenance::Actor {
+                id: "tester".into(),
+                role: EvidenceRole::Tester,
+            },
+            EvidenceKind::Ci => EvidenceProvenance::TrustedSystem {
+                id: "ci".into(),
+                role: EvidenceRole::Ci,
+            },
+            EvidenceKind::Security => EvidenceProvenance::Actor {
+                id: "security".into(),
+                role: EvidenceRole::Security,
+            },
+            EvidenceKind::Review => EvidenceProvenance::Actor {
+                id: "reviewer".into(),
+                role: EvidenceRole::Reviewer,
+            },
+            EvidenceKind::Browser | EvidenceKind::Release => EvidenceProvenance::Unverified,
+        };
+        EvidenceRecord::with_provenance(kind, status, expected.clone(), "fixture", provenance)
+            .unwrap()
     }
 
     fn gate(subject: &EvidenceSubject, kind: EvidenceKind) -> EvidenceGate {
@@ -358,6 +523,82 @@ mod tests {
         assert_eq!(
             result,
             GateResult::Blocked(vec![Blocker::Failed(EvidenceKind::Test)])
+        );
+    }
+
+    #[test]
+    fn pass_and_fail_block_in_either_order() {
+        let expected = subject("task-a", 7, "abc123");
+        for evidence in [
+            vec![
+                record(EvidenceKind::Test, EvidenceStatus::Pass, &expected),
+                record(EvidenceKind::Test, EvidenceStatus::Fail, &expected),
+            ],
+            vec![
+                record(EvidenceKind::Test, EvidenceStatus::Fail, &expected),
+                record(EvidenceKind::Test, EvidenceStatus::Pass, &expected),
+            ],
+        ] {
+            assert_eq!(
+                gate(&expected, EvidenceKind::Test).evaluate(&evidence),
+                GateResult::Blocked(vec![Blocker::Failed(EvidenceKind::Test)])
+            );
+        }
+    }
+
+    #[test]
+    fn pass_and_unavailable_block_in_either_order() {
+        let expected = subject("task-a", 7, "abc123");
+        for evidence in [
+            vec![
+                record(EvidenceKind::Test, EvidenceStatus::Pass, &expected),
+                record(EvidenceKind::Test, EvidenceStatus::Unavailable, &expected),
+            ],
+            vec![
+                record(EvidenceKind::Test, EvidenceStatus::Unavailable, &expected),
+                record(EvidenceKind::Test, EvidenceStatus::Pass, &expected),
+            ],
+        ] {
+            assert_eq!(
+                gate(&expected, EvidenceKind::Test).evaluate(&evidence),
+                GateResult::Blocked(vec![Blocker::Unavailable(EvidenceKind::Test)])
+            );
+        }
+    }
+
+    #[test]
+    fn duplicate_pass_is_satisfied() {
+        let expected = subject("task-a", 7, "abc123");
+        let evidence = [
+            record(EvidenceKind::Test, EvidenceStatus::Pass, &expected),
+            record(EvidenceKind::Test, EvidenceStatus::Pass, &expected),
+        ];
+        assert_eq!(
+            gate(&expected, EvidenceKind::Test).evaluate(&evidence),
+            GateResult::Ready
+        );
+    }
+
+    #[test]
+    fn stale_pass_plus_exact_pass_is_satisfied() {
+        let expected = subject("task-a", 8, "def456");
+        let stale = subject("task-a", 7, "abc123");
+        let evidence = [
+            record(EvidenceKind::Test, EvidenceStatus::Pass, &stale),
+            record(EvidenceKind::Test, EvidenceStatus::Pass, &expected),
+        ];
+        assert_eq!(
+            gate(&expected, EvidenceKind::Test).evaluate(&evidence),
+            GateResult::Ready
+        );
+    }
+
+    #[test]
+    fn unverified_subject_cannot_satisfy_gate() {
+        let expected = EvidenceSubject::new("task-a", 7, "abc123").unwrap();
+        assert_eq!(
+            gate(&expected, EvidenceKind::Test).evaluate(&[]),
+            GateResult::Blocked(vec![Blocker::ProvenanceRequired])
         );
     }
 
