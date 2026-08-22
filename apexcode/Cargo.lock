@@ -24,6 +24,13 @@ name = "apex-policy"
 version = "0.1.0"
 
 [[package]]
+name = "apex-runtime-adapter"
+version = "0.1.0"
+dependencies = [
+ "apex-policy",
+]
+
+[[package]]
 name = "apex-runtime-trust"
 version = "0.1.0"
 dependencies = [

@@ -4,6 +4,7 @@ members = [
     "apex-task-state",
     "apex-evidence",
     "apex-orchestrator",
+    "apex-runtime-adapter",
     "apex-runtime-trust",
 ]
 resolver = "3"

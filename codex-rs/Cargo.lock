@@ -393,6 +393,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2a4385e2e34eb35d6b3efe798b9eb88096925d87726c0798709bf56d9ed84af3"
 
 [[package]]
+name = "apex-policy"
+version = "0.1.0"
+
+[[package]]
+name = "apex-runtime-adapter"
+version = "0.1.0"
+dependencies = [
+ "apex-policy",
+]
+
+[[package]]
 name = "app_test_support"
 version = "0.0.0"
 dependencies = [
@@ -1985,6 +1996,7 @@ name = "codex-app-server"
 version = "0.0.0"
 dependencies = [
  "anyhow",
+ "apex-runtime-adapter",
  "app_test_support",
  "axum",
  "base64 0.22.1",
