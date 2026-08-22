@@ -5,9 +5,16 @@ foundation; it is not a production-readiness claim.
 
 ## Reviewed foundation
 
-Safety Kernel SHA:
+Previous public candidate SHA (superseded):
 
 `bae1efc121a158c91cab08b8ae4e7cfe4199e77f`
+
+Final closure checkpoint SHA:
+
+`aed18794421bf75deed3cdb8c90e94f47bf685d6`
+
+The final checkpoint incorporates the remaining reachable review feedback;
+the previous SHA must not be read as containing these later fixes.
 
 The kernel is composed of:
 
@@ -19,7 +26,8 @@ The kernel is composed of:
 
 ## Evidence
 
-- Kernel test suite: **70/70 PASS**
+- Kernel test suite: **76/76 PASS**
+- Apex workspace total: **86/86 PASS**
 - Eight previously discovered security findings were remediated and
   revalidated.
 

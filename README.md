@@ -6,6 +6,7 @@ ApexCode is an independent open-source engineering control-plane project built o
 
 ## ApexCode Status
 
+- **Final review closure v0.1** — owner review pending; no production claim
 - **Safety Kernel v0.1** — [security-reviewed candidate](./docs/APEXCODE-SAFETY-KERNEL-V0.1.md)
 - **Runtime Adapter v0.1** — [first real Codex pre-execution policy gate](./docs/APEXCODE-RUNTIME-ADAPTER-V0.1.md)
 

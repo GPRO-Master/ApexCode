@@ -5,9 +5,17 @@ reviewed runtime integration; it is not a production-readiness claim.
 
 ## Reviewed candidate
 
-Exact reviewed SHA:
+Previous runtime candidate SHA (superseded):
 
 `3575971d7be163413a1abe9be71224b8d332e012`
+
+Final integrated closure checkpoint SHA:
+
+`aed18794421bf75deed3cdb8c90e94f47bf685d6`
+
+The final checkpoint incorporates closure feedback around the surrounding
+trust kernel. The previous runtime SHA must not be read as containing those
+later kernel fixes.
 
 Runtime boundary:
 
@@ -45,15 +53,23 @@ the normal app-server build to preserve intentional upstream compatibility.
 
 ## Public validation results
 
-- Safety kernel: **70/70 PASS**
+- Safety kernel: **76/76 PASS**
+- Apex workspace: **86/86 PASS**
 - Runtime adapter: **10/10 PASS**
-- Focused upstream integration: **3/3 PASS**
-- Nearest upstream filesystem regression: **14/14 PASS**
+- Focused upstream integration: **3/3 PASS** (PR #4 evidence; `codex-rs` is
+  unchanged)
+- Nearest upstream filesystem regression: **14/14 PASS** (PR #4 evidence;
+  `codex-rs` is unchanged)
 - Security review: **HIGH 0, MEDIUM 0, LOW 0**
 - Kernel modification: **NONE**
 - Alternate `fs/readFile` bypass: **ABSENT**
 - Blocked request invokes the filesystem processor: **NO**
 - Adapter-disabled compatibility: **PASS**
+
+The current Windows GNU toolchain rerun was blocked before upstream test
+execution by its linker resolving a user-profile path with a space. No
+`codex-rs` source changed, so the published upstream counts remain the
+unchanged PR #4 evidence and are identified as such above.
 
 The integration remains a reviewed candidate and is not claimed to be
 production-ready.
