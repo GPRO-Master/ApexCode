@@ -1,3 +1,41 @@
+# ApexCode — Codex+++
+
+ApexCode is an independent open-source engineering control-plane project built on [OpenAI Codex](https://github.com/openai/codex).
+
+**Status:** bootstrap / experimental. ApexCode is not an official OpenAI product and is not endorsed by OpenAI.
+
+The project focuses on capabilities around Codex rather than replacing its core unnecessarily:
+
+- persistent long-horizon task state
+- multi-agent role orchestration
+- evidence-driven completion gates
+- anti-destructive R0–R5 policy classification
+- provider-neutral model routing
+- isolated Git worktrees
+- browser/application verification
+- remote and fleet-aware engineering
+- reproducible ApexBench evaluation
+
+ApexCode's core safety principle is:
+
+> **Agent autonomy may increase. Authority does not automatically increase with it.**
+
+Current ApexCode-specific work is intentionally isolated under `apexcode/` while integration points are validated. The first implementation slice is `apexcode/apex-policy`, which defines risk and approval primitives without changing upstream Codex runtime behavior.
+
+Project documents:
+
+- [Architecture](./ARCHITECTURE.md)
+- [Roadmap](./ROADMAP.md)
+- [Upstream provenance and sync policy](./UPSTREAM.md)
+- [Security policy](./SECURITY.md)
+- [ApexBench](./benchmarks/APEXBENCH.md)
+
+---
+
+## Upstream Codex README
+
+The content below is retained from the upstream Codex project for compatibility and attribution while ApexCode's integration evolves.
+
 <p align="center"><strong>Codex CLI</strong> is a coding agent from OpenAI that runs locally on your computer.
 <p align="center">
   <img src="https://github.com/openai/codex/blob/main/.github/codex-cli-splash.png" alt="Codex CLI splash" width="80%" />
