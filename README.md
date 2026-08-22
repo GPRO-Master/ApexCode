@@ -4,6 +4,14 @@ ApexCode is an independent open-source engineering control-plane project built o
 
 **Status:** bootstrap / experimental. ApexCode is not an official OpenAI product and is not endorsed by OpenAI.
 
+## ApexCode Status
+
+- **Safety Kernel v0.1** — [security-reviewed candidate](./docs/APEXCODE-SAFETY-KERNEL-V0.1.md)
+- **Runtime Adapter v0.1** — [first real Codex pre-execution policy gate](./docs/APEXCODE-RUNTIME-ADAPTER-V0.1.md)
+
+These documents describe reviewed experimental candidates; they do not claim
+production readiness or official OpenAI endorsement.
+
 The project focuses on capabilities around Codex rather than replacing its core unnecessarily:
 
 - persistent long-horizon task state
