@@ -20,7 +20,13 @@ ApexCode's core safety principle is:
 
 > **Agent autonomy may increase. Authority does not automatically increase with it.**
 
-Current ApexCode-specific work is intentionally isolated under `apexcode/` while integration points are validated. The first implementation slice is `apexcode/apex-policy`, which defines risk and approval primitives without changing upstream Codex runtime behavior.
+Current ApexCode-specific work is intentionally isolated under `apexcode/` while integration points are validated. The current foundation is:
+
+- `apex-policy`: risk and authority classification
+- `apex-task-state`: persistent long-horizon state and safe transitions
+- `apex-evidence`: revision-bound proof and completion gates
+
+These crates do not change upstream Codex runtime behavior.
 
 Project documents:
 
