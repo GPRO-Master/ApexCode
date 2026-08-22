@@ -1,0 +1,13 @@
+[package]
+name = "apex-runtime-trust"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+description = "Authenticated runtime trust boundaries for ApexCode"
+publish = false
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+apex-task-state = { path = "../apex-task-state" }

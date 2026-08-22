@@ -1,0 +1,14 @@
+[package]
+name = "apex-task-state"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+description = "Persistent task state and safe transitions for ApexCode"
+publish = false
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+hmac = "0.12"
+sha2 = "0.10"

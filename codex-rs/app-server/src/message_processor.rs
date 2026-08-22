@@ -56,6 +56,10 @@ use crate::thread_state::ThreadStateManager;
 use crate::transport::AppServerTransport;
 use crate::transport::RemoteControlHandle;
 use crate::turn_cost_worker::TurnCostWorker;
+#[cfg(feature = "apex-runtime-adapter")]
+use apex_runtime_adapter::GateDecision;
+#[cfg(feature = "apex-runtime-adapter")]
+use apex_runtime_adapter::RuntimeActionRequest;
 use codex_analytics::AnalyticsEventsClient;
 use codex_analytics::AppServerRpcTransport;
 use codex_app_server_protocol::ClientNotification;
@@ -1063,11 +1067,28 @@ impl MessageProcessor {
             ClientRequest::EnvironmentStatus { params, .. } => {
                 self.environment_processor.environment_status(params).await
             }
-            ClientRequest::FsReadFile { params, .. } => self
-                .fs_processor
-                .read_file(params)
-                .await
-                .map(|response| Some(response.into())),
+            ClientRequest::FsReadFile { request_id, params } => {
+                #[cfg(not(feature = "apex-runtime-adapter"))]
+                let _ = request_id;
+                #[cfg(feature = "apex-runtime-adapter")]
+                {
+                    let action = RuntimeActionRequest::read_file(
+                        request_id.to_string(),
+                        params.path.to_string_lossy().into_owned(),
+                    );
+                    let decision = GateDecision::evaluate(&action);
+                    if !decision.is_allowed() {
+                        return Err(invalid_request(format!(
+                            "Apex runtime adapter blocked fs/readFile: {:?}",
+                            decision.block_reason()
+                        )));
+                    }
+                }
+                self.fs_processor
+                    .read_file(params)
+                    .await
+                    .map(|response| Some(response.into()))
+            }
             ClientRequest::FsWriteFile { params, .. } => self
                 .fs_processor
                 .write_file(params)

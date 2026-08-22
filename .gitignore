@@ -9,6 +9,7 @@ node_modules
 
 # build
 dist/
+/apexcode/target/
 bazel-*
 user.bazelrc
 build/

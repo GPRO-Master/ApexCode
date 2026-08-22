@@ -1,3 +1,56 @@
+# ApexCode — Codex+++
+
+ApexCode is an independent open-source engineering control-plane project built on [OpenAI Codex](https://github.com/openai/codex).
+
+**Status:** bootstrap / experimental. ApexCode is not an official OpenAI product and is not endorsed by OpenAI.
+
+## ApexCode Status
+
+- **Final review closure v0.1** — owner review pending; no production claim
+- **Safety Kernel v0.1** — [security-reviewed candidate](./docs/APEXCODE-SAFETY-KERNEL-V0.1.md)
+- **Runtime Adapter v0.1** — [first real Codex pre-execution policy gate](./docs/APEXCODE-RUNTIME-ADAPTER-V0.1.md)
+
+These documents describe reviewed experimental candidates; they do not claim
+production readiness or official OpenAI endorsement.
+
+The project focuses on capabilities around Codex rather than replacing its core unnecessarily:
+
+- persistent long-horizon task state
+- multi-agent role orchestration
+- evidence-driven completion gates
+- anti-destructive R0–R5 policy classification
+- provider-neutral model routing
+- isolated Git worktrees
+- browser/application verification
+- remote and fleet-aware engineering
+- reproducible ApexBench evaluation
+
+ApexCode's core safety principle is:
+
+> **Agent autonomy may increase. Authority does not automatically increase with it.**
+
+Current ApexCode-specific work is intentionally isolated under `apexcode/` while integration points are validated. The current foundation is:
+
+- `apex-policy`: risk and authority classification
+- `apex-task-state`: persistent long-horizon state and safe transitions
+- `apex-evidence`: revision-bound proof and completion gates
+
+These crates do not change upstream Codex runtime behavior.
+
+Project documents:
+
+- [Architecture](./ARCHITECTURE.md)
+- [Roadmap](./ROADMAP.md)
+- [Upstream provenance and sync policy](./UPSTREAM.md)
+- [Security policy](./SECURITY.md)
+- [ApexBench](./benchmarks/APEXBENCH.md)
+
+---
+
+## Upstream Codex README
+
+The content below is retained from the upstream Codex project for compatibility and attribution while ApexCode's integration evolves.
+
 <p align="center"><strong>Codex CLI</strong> is a coding agent from OpenAI that runs locally on your computer.
 <p align="center">
   <img src="https://github.com/openai/codex/blob/main/.github/codex-cli-splash.png" alt="Codex CLI splash" width="80%" />

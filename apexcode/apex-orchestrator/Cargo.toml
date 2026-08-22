@@ -1,0 +1,16 @@
+[package]
+name = "apex-orchestrator"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+description = "Role-separated orchestration and release decisions for ApexCode"
+publish = false
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+apex-evidence = { path = "../apex-evidence" }
+apex-policy = { path = "../apex-policy" }
+apex-runtime-trust = { path = "../apex-runtime-trust" }
+apex-task-state = { path = "../apex-task-state" }

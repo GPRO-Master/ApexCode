@@ -1,0 +1,10 @@
+[package]
+name = "apex-policy"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+description = "Risk classification and approval policy primitives for ApexCode"
+publish = false
+
+[lib]
+path = "src/lib.rs"
