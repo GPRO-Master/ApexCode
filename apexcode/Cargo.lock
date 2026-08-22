@@ -7,6 +7,15 @@ name = "apex-evidence"
 version = "0.1.0"
 
 [[package]]
+name = "apex-orchestrator"
+version = "0.1.0"
+dependencies = [
+ "apex-evidence",
+ "apex-policy",
+ "apex-task-state",
+]
+
+[[package]]
 name = "apex-policy"
 version = "0.1.0"
 

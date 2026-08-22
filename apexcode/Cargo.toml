@@ -3,5 +3,6 @@ members = [
     "apex-policy",
     "apex-task-state",
     "apex-evidence",
+    "apex-orchestrator",
 ]
 resolver = "3"

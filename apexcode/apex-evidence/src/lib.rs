@@ -373,9 +373,17 @@ mod tests {
 
     struct FixtureVerifier;
 
+    struct RejectingVerifier;
+
     impl SourceVerifier for FixtureVerifier {
         fn verify(&self, _task_id: &str, _task_revision: u64, _source_revision: &str) -> bool {
             true
+        }
+    }
+
+    impl SourceVerifier for RejectingVerifier {
+        fn verify(&self, _task_id: &str, _task_revision: u64, _source_revision: &str) -> bool {
+            false
         }
     }
 
@@ -600,6 +608,16 @@ mod tests {
             gate(&expected, EvidenceKind::Test).evaluate(&[]),
             GateResult::Blocked(vec![Blocker::ProvenanceRequired])
         );
+    }
+
+    #[test]
+    fn failed_verification_does_not_upgrade_subject() {
+        let subject = EvidenceSubject::new("task-a", 7, "abc123").unwrap();
+        assert_eq!(
+            subject.clone().verify_with(&RejectingVerifier),
+            Err(EvidenceError::VerificationFailed)
+        );
+        assert!(!subject.is_verified());
     }
 
     #[test]
