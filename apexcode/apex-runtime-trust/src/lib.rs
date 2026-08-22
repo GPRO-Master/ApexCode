@@ -16,7 +16,8 @@ use std::{
 pub enum TrustError {
     EmptyTaskId,
     EmptySourceRevision,
-    EmptyCommandIdentity,
+    EmptyDisplayLabel,
+    EmptyApprovedCheck,
     EmptyProgram,
     InvalidSnapshotKey,
     Snapshot(SnapshotError),
@@ -28,6 +29,8 @@ pub enum TrustError {
     SourceMismatch,
     SourceNotCurrent,
     ExecutionFailed(String),
+    ExecutionNotSuccessful,
+    AuthorityMismatch,
     Timeout,
 }
 
@@ -38,7 +41,10 @@ impl fmt::Display for TrustError {
             Self::EmptySourceRevision => {
                 formatter.write_str("trust source revision must not be empty")
             }
-            Self::EmptyCommandIdentity => formatter.write_str("command identity must not be empty"),
+            Self::EmptyDisplayLabel => {
+                formatter.write_str("execution display label must not be empty")
+            }
+            Self::EmptyApprovedCheck => formatter.write_str("approved check must not be empty"),
             Self::EmptyProgram => formatter.write_str("trusted command program must not be empty"),
             Self::InvalidSnapshotKey => formatter.write_str("snapshot key is invalid"),
             Self::Snapshot(error) => write!(formatter, "snapshot trust failed: {error}"),
@@ -56,6 +62,12 @@ impl fmt::Display for TrustError {
             Self::SourceNotCurrent => formatter.write_str("verified source is no longer current"),
             Self::ExecutionFailed(error) => {
                 write!(formatter, "trusted command failed to start: {error}")
+            }
+            Self::ExecutionNotSuccessful => {
+                formatter.write_str("execution did not produce a successful result")
+            }
+            Self::AuthorityMismatch => {
+                formatter.write_str("execution does not match runtime authority")
             }
             Self::Timeout => formatter.write_str("trusted command timed out"),
         }
@@ -232,19 +244,26 @@ pub enum ExecutorKind {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TrustedExecutionReceipt {
+pub struct ObservedExecution {
     executor: ExecutorKind,
+    repository_root: PathBuf,
     task_id: String,
     task_revision: u64,
     source_revision: String,
-    command_identity: String,
+    program: PathBuf,
+    args: Vec<String>,
+    display_label: String,
     outcome: ExecutionOutcome,
     exit_code: Option<i32>,
 }
 
-impl TrustedExecutionReceipt {
+impl ObservedExecution {
     pub const fn executor(&self) -> ExecutorKind {
         self.executor
+    }
+
+    pub fn repository_root(&self) -> &Path {
+        &self.repository_root
     }
 
     pub fn task_id(&self) -> &str {
@@ -259,8 +278,16 @@ impl TrustedExecutionReceipt {
         &self.source_revision
     }
 
-    pub fn command_identity(&self) -> &str {
-        &self.command_identity
+    pub fn program(&self) -> &Path {
+        &self.program
+    }
+
+    pub fn args(&self) -> &[String] {
+        &self.args
+    }
+
+    pub fn display_label(&self) -> &str {
+        &self.display_label
     }
 
     pub const fn outcome(&self) -> ExecutionOutcome {
@@ -272,28 +299,126 @@ impl TrustedExecutionReceipt {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TrustedExecutionReceipt {
+    executor: ExecutorKind,
+    repository_root: PathBuf,
+    task_id: String,
+    task_revision: u64,
+    source_revision: String,
+    check_identity: String,
+    outcome: ExecutionOutcome,
+    exit_code: Option<i32>,
+}
+
+impl TrustedExecutionReceipt {
+    pub const fn executor(&self) -> ExecutorKind {
+        self.executor
+    }
+
+    pub fn repository_root(&self) -> &Path {
+        &self.repository_root
+    }
+
+    pub fn task_id(&self) -> &str {
+        &self.task_id
+    }
+
+    pub const fn task_revision(&self) -> u64 {
+        self.task_revision
+    }
+
+    pub fn source_revision(&self) -> &str {
+        &self.source_revision
+    }
+
+    pub fn check_identity(&self) -> &str {
+        &self.check_identity
+    }
+
+    pub const fn outcome(&self) -> ExecutionOutcome {
+        self.outcome
+    }
+
+    pub const fn exit_code(&self) -> Option<i32> {
+        self.exit_code
+    }
+}
+
+#[derive(Debug)]
+pub struct RuntimeExecutionAuthority {
+    source: VerifiedSource,
+    approved_check: String,
+}
+
+impl RuntimeExecutionAuthority {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn test_fixture(
+        source: &VerifiedSource,
+        approved_check: impl Into<String>,
+    ) -> Result<Self, TrustError> {
+        let approved_check = approved_check.into();
+        if approved_check.is_empty() {
+            return Err(TrustError::EmptyApprovedCheck);
+        }
+        Ok(Self {
+            source: source.clone(),
+            approved_check,
+        })
+    }
+
+    pub fn issue(
+        &self,
+        observed: &ObservedExecution,
+    ) -> Result<TrustedExecutionReceipt, TrustError> {
+        if observed.repository_root() != self.source.repository_root()
+            || observed.task_id() != self.source.task_id()
+            || observed.task_revision() != self.source.task_revision()
+            || observed.source_revision() != self.source.source_revision()
+        {
+            return Err(TrustError::AuthorityMismatch);
+        }
+        if !self.source.is_current() {
+            return Err(TrustError::SourceNotCurrent);
+        }
+        if observed.outcome() != ExecutionOutcome::Pass {
+            return Err(TrustError::ExecutionNotSuccessful);
+        }
+        Ok(TrustedExecutionReceipt {
+            executor: observed.executor(),
+            repository_root: self.source.repository_root().to_owned(),
+            task_id: self.source.task_id().to_owned(),
+            task_revision: self.source.task_revision(),
+            source_revision: self.source.source_revision().to_owned(),
+            check_identity: self.approved_check.clone(),
+            outcome: observed.outcome(),
+            exit_code: observed.exit_code(),
+        })
+    }
+}
+
 #[derive(Debug, Clone)]
-pub struct TrustedCommandRunner {
+pub struct LocalCommandRunner {
     program: PathBuf,
     args: Vec<String>,
-    command_identity: String,
+    display_label: String,
     timeout: Duration,
 }
 
-impl TrustedCommandRunner {
+impl LocalCommandRunner {
     pub fn new(
         program: impl Into<PathBuf>,
         args: impl IntoIterator<Item = impl Into<String>>,
-        command_identity: impl Into<String>,
+        display_label: impl Into<String>,
         timeout: Duration,
     ) -> Result<Self, TrustError> {
         let program = program.into();
         if program.as_os_str().is_empty() {
             return Err(TrustError::EmptyProgram);
         }
-        let command_identity = command_identity.into();
-        if command_identity.is_empty() {
-            return Err(TrustError::EmptyCommandIdentity);
+        let display_label = display_label.into();
+        if display_label.is_empty() {
+            return Err(TrustError::EmptyDisplayLabel);
         }
         if timeout.is_zero() {
             return Err(TrustError::Timeout);
@@ -301,7 +426,7 @@ impl TrustedCommandRunner {
         Ok(Self {
             program,
             args: args.into_iter().map(Into::into).collect(),
-            command_identity,
+            display_label,
             timeout,
         })
     }
@@ -311,7 +436,7 @@ impl TrustedCommandRunner {
         source: &VerifiedSource,
         task_id: &str,
         task_revision: u64,
-    ) -> Result<TrustedExecutionReceipt, TrustError> {
+    ) -> Result<ObservedExecution, TrustError> {
         if source.task_id() != task_id || source.task_revision() != task_revision {
             return Err(TrustError::SourceMismatch);
         }
@@ -348,12 +473,15 @@ impl TrustedCommandRunner {
             }
             thread::sleep(Duration::from_millis(10));
         };
-        Ok(TrustedExecutionReceipt {
+        Ok(ObservedExecution {
             executor: ExecutorKind::LocalCommand,
+            repository_root: source.repository_root().to_owned(),
             task_id: task_id.to_owned(),
             task_revision,
             source_revision: source.source_revision().to_owned(),
-            command_identity: self.command_identity.clone(),
+            program: self.program.clone(),
+            args: self.args.clone(),
+            display_label: self.display_label.clone(),
             outcome,
             exit_code,
         })
@@ -439,12 +567,12 @@ mod tests {
     }
 
     #[test]
-    fn successful_and_failed_commands_produce_bound_receipts() {
+    fn successful_and_failed_commands_produce_observations() {
         let (root, head) = fixture_repo();
         let source = GitSourceVerifier::new()
             .verify_repository(&root, "task-1", 7, &head)
             .unwrap();
-        let success = TrustedCommandRunner::new(
+        let success = LocalCommandRunner::new(
             "rustc",
             ["--version"],
             "rustc-version",
@@ -455,7 +583,13 @@ mod tests {
         .unwrap();
         assert_eq!(success.outcome(), ExecutionOutcome::Pass);
         assert_eq!(success.source_revision(), head);
-        let failure = TrustedCommandRunner::new(
+        assert_eq!(success.display_label(), "rustc-version");
+        let authority = RuntimeExecutionAuthority::test_fixture(&source, "approved-rustc").unwrap();
+        let receipt = authority.issue(&success).unwrap();
+        assert_eq!(receipt.check_identity(), "approved-rustc");
+        assert_eq!(receipt.repository_root(), source.repository_root());
+
+        let failure = LocalCommandRunner::new(
             "rustc",
             ["--not-a-real-option"],
             "rustc-failure",
@@ -465,6 +599,61 @@ mod tests {
         .execute(&source, "task-1", 7)
         .unwrap();
         assert_eq!(failure.outcome(), ExecutionOutcome::Fail);
+        assert_eq!(
+            authority.issue(&failure),
+            Err(TrustError::ExecutionNotSuccessful)
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn caller_selected_identity_is_observation_only() {
+        let (root, head) = fixture_repo();
+        let source = GitSourceVerifier::new()
+            .verify_repository(&root, "task-1", 7, &head)
+            .unwrap();
+        let observed = LocalCommandRunner::new(
+            "cmd.exe",
+            ["/C", "exit", "0"],
+            "github-actions",
+            Duration::from_secs(5),
+        )
+        .unwrap()
+        .execute(&source, "task-1", 7)
+        .unwrap();
+        assert_eq!(observed.outcome(), ExecutionOutcome::Pass);
+        assert_eq!(observed.display_label(), "github-actions");
+
+        let authority = RuntimeExecutionAuthority::test_fixture(&source, "approved-ci").unwrap();
+        let receipt = authority.issue(&observed).unwrap();
+        assert_eq!(receipt.check_identity(), "approved-ci");
+        assert_ne!(receipt.check_identity(), observed.display_label());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn authority_rejects_stale_or_mismatched_observations() {
+        let (root, head) = fixture_repo();
+        let source = GitSourceVerifier::new()
+            .verify_repository(&root, "task-1", 7, &head)
+            .unwrap();
+        let authority = RuntimeExecutionAuthority::test_fixture(&source, "approved-test").unwrap();
+        let other_source = GitSourceVerifier::new()
+            .verify_repository(&root, "task-2", 7, &head)
+            .unwrap();
+        let observed = LocalCommandRunner::new(
+            "rustc",
+            ["--version"],
+            "display-only",
+            Duration::from_secs(5),
+        )
+        .unwrap()
+        .execute(&other_source, "task-2", 7)
+        .unwrap();
+        assert_eq!(
+            authority.issue(&observed),
+            Err(TrustError::AuthorityMismatch)
+        );
         fs::remove_dir_all(root).unwrap();
     }
 }

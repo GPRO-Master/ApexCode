@@ -852,6 +852,10 @@ impl Workflow {
                     && receipt.task_id() == self.subject.task_id()
                     && receipt.task_revision() == self.subject.task_revision()
                     && receipt.source_revision() == self.subject.source_revision()
+                    && self
+                        .source
+                        .as_ref()
+                        .is_some_and(|source| receipt.repository_root() == source.repository_root())
             }
             EvidenceProvenance::Unverified => false,
         }
@@ -898,7 +902,7 @@ mod tests {
     use apex_evidence::{
         EvidenceKind, EvidenceProvenance, EvidenceRole, EvidenceStatus, EvidenceSubject,
     };
-    use apex_runtime_trust::{GitSourceVerifier, TrustedCommandRunner};
+    use apex_runtime_trust::{GitSourceVerifier, LocalCommandRunner, RuntimeExecutionAuthority};
     use std::{
         fs,
         path::PathBuf,
@@ -1042,7 +1046,7 @@ mod tests {
             .unwrap();
         workflow.prepare_release(&devops, &subject).unwrap();
         let source = workflow.verified_source().unwrap().clone();
-        let receipt = TrustedCommandRunner::new(
+        let observed = LocalCommandRunner::new(
             "rustc",
             ["--version"],
             "fixture-trusted-test",
@@ -1051,6 +1055,9 @@ mod tests {
         .unwrap()
         .execute(&source, state.id().as_str(), state.revision())
         .unwrap();
+        let runtime_authority =
+            RuntimeExecutionAuthority::test_fixture(&source, "fixture-approved-ci").unwrap();
+        let receipt = runtime_authority.issue(&observed).unwrap();
         workflow
             .submit_trusted_execution_evidence(&receipt, &subject, EvidenceKind::Ci, "fixture")
             .unwrap();

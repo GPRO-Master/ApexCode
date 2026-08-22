@@ -2,7 +2,10 @@
 // Licensed under Apache-2.0. See the repository LICENSE file.
 
 use apex_runtime_trust::{ExecutionOutcome, TrustedExecutionReceipt, VerifiedSource};
-use std::fmt;
+use std::{
+    fmt,
+    path::{Path, PathBuf},
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum EvidenceKind {
@@ -26,6 +29,7 @@ pub struct EvidenceSubject {
     task_id: String,
     task_revision: u64,
     source_revision: String,
+    repository_root: Option<PathBuf>,
     provenance: SubjectProvenance,
 }
 
@@ -87,6 +91,7 @@ impl EvidenceSubject {
             task_id: task_id.into(),
             task_revision,
             source_revision: source_revision.into(),
+            repository_root: None,
             provenance: SubjectProvenance::Unverified,
         };
         subject.validate()?;
@@ -98,6 +103,7 @@ impl EvidenceSubject {
             task_id: source.task_id().to_owned(),
             task_revision: source.task_revision(),
             source_revision: source.source_revision().to_owned(),
+            repository_root: Some(source.repository_root().to_owned()),
             provenance: SubjectProvenance::Verified,
         };
         subject.validate()?;
@@ -114,6 +120,10 @@ impl EvidenceSubject {
 
     pub fn source_revision(&self) -> &str {
         &self.source_revision
+    }
+
+    pub fn repository_root(&self) -> Option<&Path> {
+        self.repository_root.as_deref()
     }
 
     pub const fn is_verified(&self) -> bool {
@@ -173,6 +183,7 @@ impl EvidenceRecord {
                 if receipt.task_id() != subject.task_id()
                     || receipt.task_revision() != subject.task_revision()
                     || receipt.source_revision() != subject.source_revision()
+                    || subject.repository_root() != Some(receipt.repository_root())
                 {
                     return Err(EvidenceError::ProvenanceMismatch);
                 }

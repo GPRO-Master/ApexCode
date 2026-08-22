@@ -10,7 +10,9 @@ worktree with the requested `HEAD` and no uncommitted or untracked changes. A
 `VerifiedSource` is opaque and is rechecked before trusted command execution and
 release evaluation.
 
-`TrustedExecutionReceipt` is created only by the bounded local command runner from
-the observed process result. External CI has no authenticated provider integration
-in this foundation and therefore remains unavailable; unavailable CI cannot satisfy
-the Ready evidence gate.
+`LocalCommandRunner` creates only a non-authoritative `ObservedExecution` from the
+observed process result. An opaque `TrustedExecutionReceipt` requires a runtime
+execution authority bound to an approved check, exact source, and task revision.
+No production constructor for that authority exists in this foundation. External CI
+has no authenticated provider integration and therefore remains unavailable;
+unavailable CI cannot satisfy the Ready evidence gate.

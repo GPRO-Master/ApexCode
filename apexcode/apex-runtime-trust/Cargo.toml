@@ -9,5 +9,8 @@ publish = false
 [lib]
 path = "src/lib.rs"
 
+[features]
+test-support = []
+
 [dependencies]
 apex-task-state = { path = "../apex-task-state" }
