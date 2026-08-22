@@ -1,11 +1,16 @@
 // Modified for ApexCode by GPRO-Master.
 // Licensed under Apache-2.0. See the repository LICENSE file.
 
+use hmac::{Hmac, Mac};
+use sha2::Sha256;
 use std::fmt;
 
-pub const SNAPSHOT_VERSION: u16 = 1;
+pub const SNAPSHOT_VERSION: u16 = 2;
 
 const SNAPSHOT_MAGIC: &[u8] = b"APEX_TASK_STATE\0";
+const SNAPSHOT_MAC_LENGTH: usize = 32;
+
+type HmacSha256 = Hmac<Sha256>;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TaskStateError {
@@ -172,19 +177,7 @@ impl TaskState {
     }
 
     pub fn validate(&self) -> Result<(), TaskStateError> {
-        if self.id.as_str().is_empty() {
-            return Err(TaskStateError::EmptyTaskId);
-        }
-        if self.objective.is_empty() {
-            return Err(TaskStateError::EmptyObjective);
-        }
-        if self.revision < minimum_revision(self.status) {
-            return Err(TaskStateError::InvalidRevision {
-                status: self.status,
-                revision: self.revision,
-            });
-        }
-        Ok(())
+        validate_checkpoint(&self.checkpoint())
     }
 
     pub fn transition(&mut self, next: TaskStatus) -> Result<(), TransitionError> {
@@ -214,13 +207,8 @@ impl TaskState {
         }
     }
 
-    pub fn from_checkpoint(checkpoint: Checkpoint) -> Result<Self, TaskStateError> {
-        if checkpoint.id.as_str().is_empty() {
-            return Err(TaskStateError::EmptyTaskId);
-        }
-        if checkpoint.objective.is_empty() {
-            return Err(TaskStateError::EmptyObjective);
-        }
+    fn from_checkpoint_inner(checkpoint: Checkpoint) -> Result<Self, TaskStateError> {
+        validate_checkpoint(&checkpoint)?;
         let state = Self {
             id: checkpoint.id,
             objective: checkpoint.objective,
@@ -228,17 +216,24 @@ impl TaskState {
             status: checkpoint.status,
             revision: checkpoint.revision,
         };
-        state.validate()?;
         Ok(state)
     }
+}
 
-    pub fn encode_snapshot(&self) -> Vec<u8> {
-        encode_snapshot(self)
+fn validate_checkpoint(checkpoint: &Checkpoint) -> Result<(), TaskStateError> {
+    if checkpoint.id.as_str().is_empty() {
+        return Err(TaskStateError::EmptyTaskId);
     }
-
-    pub fn decode_snapshot(bytes: &[u8]) -> Result<Self, SnapshotError> {
-        decode_snapshot(bytes)
+    if checkpoint.objective.is_empty() {
+        return Err(TaskStateError::EmptyObjective);
     }
+    if checkpoint.revision < minimum_revision(checkpoint.status) {
+        return Err(TaskStateError::InvalidRevision {
+            status: checkpoint.status,
+            revision: checkpoint.revision,
+        });
+    }
+    Ok(())
 }
 
 const fn minimum_revision(status: TaskStatus) -> u64 {
@@ -259,6 +254,8 @@ pub enum SnapshotError {
     InvalidUtf8,
     UnsupportedVersion(u16),
     InvalidState(TaskStateError),
+    InvalidKey,
+    AuthenticationFailed,
 }
 
 impl fmt::Display for SnapshotError {
@@ -273,63 +270,192 @@ impl fmt::Display for SnapshotError {
                 )
             }
             Self::InvalidState(error) => write!(formatter, "invalid task state: {error}"),
+            Self::InvalidKey => formatter.write_str("snapshot authentication key must be 32 bytes"),
+            Self::AuthenticationFailed => formatter.write_str("snapshot authentication failed"),
         }
     }
 }
 
 impl std::error::Error for SnapshotError {}
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SnapshotCandidate {
+    envelope: Vec<u8>,
+    checkpoint: Checkpoint,
+    mac: Option<[u8; SNAPSHOT_MAC_LENGTH]>,
+}
+
+#[derive(Clone)]
+pub struct SnapshotAuthenticator {
+    key: [u8; 32],
+}
+
+impl fmt::Debug for SnapshotAuthenticator {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("SnapshotAuthenticator(<redacted>)")
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VerifiedCheckpoint {
+    checkpoint: Checkpoint,
+}
+
+impl SnapshotAuthenticator {
+    pub fn from_runtime_key(key: &[u8]) -> Result<Self, SnapshotError> {
+        let key: [u8; 32] = key.try_into().map_err(|_| SnapshotError::InvalidKey)?;
+        Ok(Self { key })
+    }
+
+    pub fn authenticate(
+        &self,
+        candidate: &SnapshotCandidate,
+    ) -> Result<VerifiedCheckpoint, SnapshotError> {
+        let Some(mac) = candidate.mac else {
+            return Err(SnapshotError::AuthenticationFailed);
+        };
+        let mut verifier = HmacSha256::new_from_slice(&self.key)
+            .map_err(|_| SnapshotError::AuthenticationFailed)?;
+        verifier.update(&candidate.envelope);
+        verifier
+            .verify_slice(&mac)
+            .map_err(|_| SnapshotError::AuthenticationFailed)?;
+        Ok(VerifiedCheckpoint {
+            checkpoint: candidate.checkpoint.clone(),
+        })
+    }
+}
+
+impl SnapshotCandidate {
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, SnapshotError> {
+        let mut reader = Reader { bytes, position: 0 };
+        if reader.take(SNAPSHOT_MAGIC.len()) != Some(SNAPSHOT_MAGIC) {
+            return Err(SnapshotError::InvalidFormat);
+        }
+        let version = reader.u16().ok_or(SnapshotError::InvalidFormat)?;
+        if version != SNAPSHOT_VERSION {
+            return Err(SnapshotError::UnsupportedVersion(version));
+        }
+        let payload_length = reader.u32().ok_or(SnapshotError::InvalidFormat)? as usize;
+        if payload_length > reader.remaining() {
+            return Err(SnapshotError::InvalidFormat);
+        }
+        let envelope_length = reader.position + payload_length;
+        let envelope = bytes
+            .get(..envelope_length)
+            .ok_or(SnapshotError::InvalidFormat)?
+            .to_vec();
+        let payload = reader
+            .take(payload_length)
+            .ok_or(SnapshotError::InvalidFormat)?;
+        let mut payload_reader = Reader {
+            bytes: payload,
+            position: 0,
+        };
+        let id = TaskId::new(payload_reader.string()?).map_err(SnapshotError::InvalidState)?;
+        let objective = payload_reader.string()?;
+        let constraint_count = payload_reader.u32().ok_or(SnapshotError::InvalidFormat)? as usize;
+        if constraint_count > payload_reader.remaining() {
+            return Err(SnapshotError::InvalidFormat);
+        }
+        let mut constraints = Vec::with_capacity(constraint_count);
+        for _ in 0..constraint_count {
+            constraints.push(payload_reader.string()?);
+        }
+        let status = byte_to_status(payload_reader.byte().ok_or(SnapshotError::InvalidFormat)?)
+            .ok_or(SnapshotError::InvalidFormat)?;
+        let revision = payload_reader.u64().ok_or(SnapshotError::InvalidFormat)?;
+        if !payload_reader.is_empty() {
+            return Err(SnapshotError::InvalidFormat);
+        }
+        let checkpoint = Checkpoint {
+            id,
+            objective,
+            constraints,
+            status,
+            revision,
+        };
+        validate_checkpoint(&checkpoint).map_err(SnapshotError::InvalidState)?;
+
+        let remaining = bytes.len().saturating_sub(envelope_length);
+        let mac = match remaining {
+            0 => None,
+            SNAPSHOT_MAC_LENGTH => Some(
+                bytes
+                    .get(envelope_length..)
+                    .ok_or(SnapshotError::InvalidFormat)?
+                    .try_into()
+                    .map_err(|_| SnapshotError::InvalidFormat)?,
+            ),
+            _ => return Err(SnapshotError::InvalidFormat),
+        };
+        Ok(Self {
+            envelope,
+            checkpoint,
+            mac,
+        })
+    }
+}
+
+impl TaskState {
+    pub fn from_verified_checkpoint(verified: VerifiedCheckpoint) -> Result<Self, TaskStateError> {
+        Self::from_checkpoint_inner(verified.checkpoint)
+    }
+
+    pub fn encode_snapshot(&self) -> Vec<u8> {
+        encode_snapshot_payload(&self.checkpoint(), None)
+    }
+
+    pub fn encode_authenticated_snapshot(&self, authenticator: &SnapshotAuthenticator) -> Vec<u8> {
+        encode_snapshot_payload(&self.checkpoint(), Some(authenticator))
+    }
+
+    pub fn decode_snapshot(bytes: &[u8]) -> Result<SnapshotCandidate, SnapshotError> {
+        SnapshotCandidate::from_bytes(bytes)
+    }
+}
+
 pub fn encode_snapshot(state: &TaskState) -> Vec<u8> {
-    let checkpoint = state.checkpoint();
+    state.encode_snapshot()
+}
+
+pub fn encode_authenticated_snapshot(
+    state: &TaskState,
+    authenticator: &SnapshotAuthenticator,
+) -> Vec<u8> {
+    state.encode_authenticated_snapshot(authenticator)
+}
+
+pub fn decode_snapshot(bytes: &[u8]) -> Result<SnapshotCandidate, SnapshotError> {
+    SnapshotCandidate::from_bytes(bytes)
+}
+
+fn encode_snapshot_payload(
+    checkpoint: &Checkpoint,
+    authenticator: Option<&SnapshotAuthenticator>,
+) -> Vec<u8> {
+    let mut payload = Vec::new();
+    put_string(&mut payload, checkpoint.id.as_str());
+    put_string(&mut payload, &checkpoint.objective);
+    payload.extend_from_slice(&(checkpoint.constraints.len() as u32).to_le_bytes());
+    for constraint in &checkpoint.constraints {
+        put_string(&mut payload, constraint);
+    }
+    payload.push(status_to_byte(checkpoint.status));
+    payload.extend_from_slice(&checkpoint.revision.to_le_bytes());
+
     let mut bytes = Vec::new();
     bytes.extend_from_slice(SNAPSHOT_MAGIC);
     bytes.extend_from_slice(&SNAPSHOT_VERSION.to_le_bytes());
-    put_string(&mut bytes, checkpoint.id.as_str());
-    put_string(&mut bytes, &checkpoint.objective);
-    bytes.extend_from_slice(&(checkpoint.constraints.len() as u32).to_le_bytes());
-    for constraint in &checkpoint.constraints {
-        put_string(&mut bytes, constraint);
+    bytes.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+    bytes.extend_from_slice(&payload);
+    if let Some(authenticator) = authenticator {
+        let mut signer =
+            HmacSha256::new_from_slice(&authenticator.key).expect("fixed-size HMAC key is valid");
+        signer.update(&bytes);
+        bytes.extend_from_slice(&signer.finalize().into_bytes());
     }
-    bytes.push(status_to_byte(checkpoint.status));
-    bytes.extend_from_slice(&checkpoint.revision.to_le_bytes());
     bytes
-}
-
-pub fn decode_snapshot(bytes: &[u8]) -> Result<TaskState, SnapshotError> {
-    let mut reader = Reader { bytes, position: 0 };
-    if reader.take(SNAPSHOT_MAGIC.len()) != Some(SNAPSHOT_MAGIC) {
-        return Err(SnapshotError::InvalidFormat);
-    }
-    let version = reader.u16().ok_or(SnapshotError::InvalidFormat)?;
-    if version != SNAPSHOT_VERSION {
-        return Err(SnapshotError::UnsupportedVersion(version));
-    }
-
-    let id = TaskId::new(reader.string()?).map_err(SnapshotError::InvalidState)?;
-    let objective = reader.string()?;
-    let constraint_count = reader.u32().ok_or(SnapshotError::InvalidFormat)? as usize;
-    if constraint_count > reader.remaining() {
-        return Err(SnapshotError::InvalidFormat);
-    }
-    let mut constraints = Vec::with_capacity(constraint_count);
-    for _ in 0..constraint_count {
-        constraints.push(reader.string()?);
-    }
-    let status = byte_to_status(reader.byte().ok_or(SnapshotError::InvalidFormat)?)
-        .ok_or(SnapshotError::InvalidFormat)?;
-    let revision = reader.u64().ok_or(SnapshotError::InvalidFormat)?;
-    if !reader.is_empty() {
-        return Err(SnapshotError::InvalidFormat);
-    }
-
-    TaskState::from_checkpoint(Checkpoint {
-        id,
-        objective,
-        constraints,
-        status,
-        revision,
-    })
-    .map_err(SnapshotError::InvalidState)
 }
 
 fn put_string(bytes: &mut Vec<u8>, value: &str) {
@@ -493,14 +619,21 @@ mod tests {
         let mut state = task();
         state.transition(TaskStatus::Running).unwrap();
         state.transition(TaskStatus::AwaitingEvidence).unwrap();
-        let restored = TaskState::from_checkpoint(state.checkpoint()).unwrap();
+        let authenticator =
+            SnapshotAuthenticator::from_runtime_key(b"01234567890123456789012345678901").unwrap();
+        let candidate =
+            SnapshotCandidate::from_bytes(&state.encode_authenticated_snapshot(&authenticator))
+                .unwrap();
+        let restored =
+            TaskState::from_verified_checkpoint(authenticator.authenticate(&candidate).unwrap())
+                .unwrap();
         assert_eq!(restored, state);
     }
 
     #[test]
     fn invalid_checkpoint_revision_is_rejected() {
         assert_eq!(
-            TaskState::from_checkpoint(Checkpoint {
+            TaskState::from_checkpoint_inner(Checkpoint {
                 id: TaskId::new("task-1").unwrap(),
                 objective: "objective".into(),
                 constraints: vec![],
@@ -519,14 +652,22 @@ mod tests {
         let mut state = task();
         state.transition(TaskStatus::Running).unwrap();
         state.transition(TaskStatus::Blocked).unwrap();
-        let encoded = state.encode_snapshot();
-        assert_eq!(encoded, state.encode_snapshot());
-        assert_eq!(TaskState::decode_snapshot(&encoded).unwrap(), state);
+        let authenticator =
+            SnapshotAuthenticator::from_runtime_key(b"01234567890123456789012345678901").unwrap();
+        let encoded = state.encode_authenticated_snapshot(&authenticator);
+        assert_eq!(encoded, state.encode_authenticated_snapshot(&authenticator));
+        let candidate = TaskState::decode_snapshot(&encoded).unwrap();
+        let restored =
+            TaskState::from_verified_checkpoint(authenticator.authenticate(&candidate).unwrap())
+                .unwrap();
+        assert_eq!(restored, state);
     }
 
     #[test]
     fn corrupt_snapshot_fails() {
-        let mut encoded = task().encode_snapshot();
+        let authenticator =
+            SnapshotAuthenticator::from_runtime_key(b"01234567890123456789012345678901").unwrap();
+        let mut encoded = task().encode_authenticated_snapshot(&authenticator);
         encoded.pop();
         assert!(matches!(
             TaskState::decode_snapshot(&encoded),
@@ -537,10 +678,90 @@ mod tests {
     #[test]
     fn unsupported_snapshot_version_fails() {
         let mut encoded = task().encode_snapshot();
-        encoded[SNAPSHOT_MAGIC.len()] = 2;
+        encoded[SNAPSHOT_MAGIC.len()] = 3;
         assert_eq!(
             TaskState::decode_snapshot(&encoded),
-            Err(SnapshotError::UnsupportedVersion(2))
+            Err(SnapshotError::UnsupportedVersion(3))
+        );
+    }
+
+    #[test]
+    fn snapshot_authentication_binds_every_authoritative_field() {
+        let authenticator =
+            SnapshotAuthenticator::from_runtime_key(b"01234567890123456789012345678901").unwrap();
+        let mut state = task();
+        state.transition(TaskStatus::Running).unwrap();
+        let encoded = state.encode_authenticated_snapshot(&authenticator);
+        let mut variants = Vec::new();
+
+        let revision_offset = encoded.len() - 32 - 1;
+        variants.push(revision_offset);
+        let id_offset = SNAPSHOT_MAGIC.len() + 2 + 4 + 4;
+        variants.push(id_offset);
+        let status_offset = encoded.len() - 32 - 9;
+        variants.push(status_offset);
+
+        for offset in variants {
+            let mut modified = encoded.clone();
+            modified[offset] ^= 1;
+            let candidate = SnapshotCandidate::from_bytes(&modified).unwrap();
+            assert_eq!(
+                authenticator.authenticate(&candidate),
+                Err(SnapshotError::AuthenticationFailed)
+            );
+        }
+    }
+
+    #[test]
+    fn wrong_key_and_unsigned_snapshot_cannot_restore() {
+        let authenticator =
+            SnapshotAuthenticator::from_runtime_key(b"01234567890123456789012345678901").unwrap();
+        let wrong_key =
+            SnapshotAuthenticator::from_runtime_key(b"abcdefghijklmnopqrstuvwxyz012345").unwrap();
+        let state = task();
+        let signed = state.encode_authenticated_snapshot(&authenticator);
+        let candidate = SnapshotCandidate::from_bytes(&signed).unwrap();
+        assert_eq!(
+            wrong_key.authenticate(&candidate),
+            Err(SnapshotError::AuthenticationFailed)
+        );
+
+        let unsigned = SnapshotCandidate::from_bytes(&state.encode_snapshot()).unwrap();
+        assert_eq!(
+            authenticator.authenticate(&unsigned),
+            Err(SnapshotError::AuthenticationFailed)
+        );
+    }
+
+    #[test]
+    fn fabricated_revision_and_completed_state_fail_authentication() {
+        let authenticator =
+            SnapshotAuthenticator::from_runtime_key(b"01234567890123456789012345678901").unwrap();
+        let state = task();
+        let encoded = state.encode_authenticated_snapshot(&authenticator);
+        let revision_offset = encoded.len() - 32 - 8;
+        let mut fabricated = encoded.clone();
+        fabricated[revision_offset..revision_offset + 8].copy_from_slice(&999u64.to_le_bytes());
+        let candidate = SnapshotCandidate::from_bytes(&fabricated).unwrap();
+        assert_eq!(
+            authenticator.authenticate(&candidate),
+            Err(SnapshotError::AuthenticationFailed)
+        );
+
+        let mut completed = state;
+        completed.transition(TaskStatus::Running).unwrap();
+        completed.transition(TaskStatus::AwaitingEvidence).unwrap();
+        completed.transition(TaskStatus::ReadyForReview).unwrap();
+        completed.transition(TaskStatus::Completed).unwrap();
+        let completed_bytes = completed.encode_authenticated_snapshot(&authenticator);
+        let mut fabricated_completed = completed_bytes.clone();
+        fabricated_completed[completed_bytes.len() - 32 - 9] = 4;
+        fabricated_completed[completed_bytes.len() - 32 - 8..completed_bytes.len() - 32]
+            .copy_from_slice(&999u64.to_le_bytes());
+        let candidate = SnapshotCandidate::from_bytes(&fabricated_completed).unwrap();
+        assert_eq!(
+            authenticator.authenticate(&candidate),
+            Err(SnapshotError::AuthenticationFailed)
         );
     }
 }

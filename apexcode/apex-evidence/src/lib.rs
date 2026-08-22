@@ -1,7 +1,11 @@
 // Modified for ApexCode by GPRO-Master.
 // Licensed under Apache-2.0. See the repository LICENSE file.
 
-use std::fmt;
+use apex_runtime_trust::{ExecutionOutcome, TrustedExecutionReceipt, VerifiedSource};
+use std::{
+    fmt,
+    path::{Path, PathBuf},
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum EvidenceKind {
@@ -25,6 +29,7 @@ pub struct EvidenceSubject {
     task_id: String,
     task_revision: u64,
     source_revision: String,
+    repository_root: Option<PathBuf>,
     provenance: SubjectProvenance,
 }
 
@@ -46,11 +51,7 @@ pub enum EvidenceRole {
 pub enum EvidenceProvenance {
     Unverified,
     Actor { id: String, role: EvidenceRole },
-    TrustedSystem { id: String, role: EvidenceRole },
-}
-
-pub trait SourceVerifier {
-    fn verify(&self, task_id: &str, task_revision: u64, source_revision: &str) -> bool;
+    TrustedExecution { receipt: TrustedExecutionReceipt },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -58,7 +59,7 @@ pub enum EvidenceError {
     EmptyTaskId,
     EmptySourceRevision,
     EmptyRequirements,
-    VerificationFailed,
+    ProvenanceMismatch,
 }
 
 impl fmt::Display for EvidenceError {
@@ -71,8 +72,8 @@ impl fmt::Display for EvidenceError {
             Self::EmptyRequirements => {
                 formatter.write_str("evidence requirements must not be empty")
             }
-            Self::VerificationFailed => {
-                formatter.write_str("source revision provenance could not be verified")
+            Self::ProvenanceMismatch => {
+                formatter.write_str("evidence provenance does not match its subject")
             }
         }
     }
@@ -90,18 +91,23 @@ impl EvidenceSubject {
             task_id: task_id.into(),
             task_revision,
             source_revision: source_revision.into(),
+            repository_root: None,
             provenance: SubjectProvenance::Unverified,
         };
         subject.validate()?;
         Ok(subject)
     }
 
-    pub fn verify_with<V: SourceVerifier>(mut self, verifier: &V) -> Result<Self, EvidenceError> {
-        if !verifier.verify(&self.task_id, self.task_revision, &self.source_revision) {
-            return Err(EvidenceError::VerificationFailed);
-        }
-        self.provenance = SubjectProvenance::Verified;
-        Ok(self)
+    pub fn from_verified_source(source: &VerifiedSource) -> Result<Self, EvidenceError> {
+        let subject = Self {
+            task_id: source.task_id().to_owned(),
+            task_revision: source.task_revision(),
+            source_revision: source.source_revision().to_owned(),
+            repository_root: Some(source.repository_root().to_owned()),
+            provenance: SubjectProvenance::Verified,
+        };
+        subject.validate()?;
+        Ok(subject)
     }
 
     pub fn task_id(&self) -> &str {
@@ -114,6 +120,10 @@ impl EvidenceSubject {
 
     pub fn source_revision(&self) -> &str {
         &self.source_revision
+    }
+
+    pub fn repository_root(&self) -> Option<&Path> {
+        self.repository_root.as_deref()
     }
 
     pub const fn is_verified(&self) -> bool {
@@ -165,11 +175,23 @@ impl EvidenceRecord {
         provenance: EvidenceProvenance,
     ) -> Result<Self, EvidenceError> {
         subject.validate()?;
-        if let EvidenceProvenance::Actor { id, .. } | EvidenceProvenance::TrustedSystem { id, .. } =
-            &provenance
-            && id.is_empty()
-        {
-            return Err(EvidenceError::EmptyTaskId);
+        match &provenance {
+            EvidenceProvenance::Actor { id, .. } if id.is_empty() => {
+                return Err(EvidenceError::EmptyTaskId);
+            }
+            EvidenceProvenance::TrustedExecution { receipt } => {
+                if receipt.task_id() != subject.task_id()
+                    || receipt.task_revision() != subject.task_revision()
+                    || receipt.source_revision() != subject.source_revision()
+                    || subject.repository_root() != Some(receipt.repository_root())
+                {
+                    return Err(EvidenceError::ProvenanceMismatch);
+                }
+                if !matches!(kind, EvidenceKind::Test | EvidenceKind::Ci) {
+                    return Err(EvidenceError::ProvenanceMismatch);
+                }
+            }
+            EvidenceProvenance::Unverified | EvidenceProvenance::Actor { .. } => {}
         }
         Ok(Self {
             kind,
@@ -196,6 +218,28 @@ impl EvidenceRecord {
         &self.provenance
     }
 
+    pub fn from_trusted_execution(
+        kind: EvidenceKind,
+        subject: EvidenceSubject,
+        detail: impl Into<String>,
+        receipt: &TrustedExecutionReceipt,
+    ) -> Result<Self, EvidenceError> {
+        let status = match receipt.outcome() {
+            ExecutionOutcome::Pass => EvidenceStatus::Pass,
+            ExecutionOutcome::Fail => EvidenceStatus::Fail,
+            ExecutionOutcome::Unavailable => EvidenceStatus::Unavailable,
+        };
+        Self::with_provenance(
+            kind,
+            status,
+            subject,
+            detail,
+            EvidenceProvenance::TrustedExecution {
+                receipt: receipt.clone(),
+            },
+        )
+    }
+
     fn is_authoritative_for(&self, kind: EvidenceKind) -> bool {
         let required_role = match kind {
             EvidenceKind::Test => EvidenceRole::Tester,
@@ -205,8 +249,11 @@ impl EvidenceRecord {
             EvidenceKind::Browser | EvidenceKind::Release => return false,
         };
         match &self.provenance {
-            EvidenceProvenance::Actor { role, .. }
-            | EvidenceProvenance::TrustedSystem { role, .. } => *role == required_role,
+            EvidenceProvenance::Actor { role, .. } => *role == required_role,
+            EvidenceProvenance::TrustedExecution { receipt } => {
+                matches!(kind, EvidenceKind::Test | EvidenceKind::Ci)
+                    && receipt.outcome() == ExecutionOutcome::Pass
+            }
             EvidenceProvenance::Unverified => false,
         }
     }
@@ -370,28 +417,40 @@ impl GateResult {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    struct FixtureVerifier;
-
-    struct RejectingVerifier;
-
-    impl SourceVerifier for FixtureVerifier {
-        fn verify(&self, _task_id: &str, _task_revision: u64, _source_revision: &str) -> bool {
-            true
-        }
-    }
-
-    impl SourceVerifier for RejectingVerifier {
-        fn verify(&self, _task_id: &str, _task_revision: u64, _source_revision: &str) -> bool {
-            false
-        }
-    }
+    use apex_runtime_trust::GitSourceVerifier;
+    use std::{fs, path::PathBuf, process::Command, time::SystemTime};
 
     fn subject(task_id: &str, revision: u64, source: &str) -> EvidenceSubject {
-        EvidenceSubject::new(task_id, revision, source)
+        let suffix = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
             .unwrap()
-            .verify_with(&FixtureVerifier)
-            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("apex-evidence-{suffix}"));
+        fs::create_dir_all(&root).unwrap();
+        run_git(&root, &["init", "-q"]);
+        run_git(&root, &["config", "user.email", "evidence@example.invalid"]);
+        run_git(&root, &["config", "user.name", "Apex Evidence"]);
+        fs::write(root.join("subject.txt"), source).unwrap();
+        run_git(&root, &["add", "."]);
+        run_git(&root, &["commit", "-qm", source]);
+        let head = run_git(&root, &["rev-parse", "HEAD"]);
+        let verified = GitSourceVerifier::new()
+            .verify_repository(&root, task_id, revision, head)
+            .unwrap();
+        let result = EvidenceSubject::from_verified_source(&verified).unwrap();
+        fs::remove_dir_all(root).unwrap();
+        result
+    }
+
+    fn run_git(root: &PathBuf, args: &[&str]) -> String {
+        let output = Command::new("git")
+            .arg("-C")
+            .arg(root)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "git failed");
+        String::from_utf8_lossy(&output.stdout).trim().to_owned()
     }
 
     fn record(
@@ -404,10 +463,7 @@ mod tests {
                 id: "tester".into(),
                 role: EvidenceRole::Tester,
             },
-            EvidenceKind::Ci => EvidenceProvenance::TrustedSystem {
-                id: "ci".into(),
-                role: EvidenceRole::Ci,
-            },
+            EvidenceKind::Ci => EvidenceProvenance::Unverified,
             EvidenceKind::Security => EvidenceProvenance::Actor {
                 id: "security".into(),
                 role: EvidenceRole::Security,
@@ -611,13 +667,13 @@ mod tests {
     }
 
     #[test]
-    fn failed_verification_does_not_upgrade_subject() {
-        let subject = EvidenceSubject::new("task-a", 7, "abc123").unwrap();
-        assert_eq!(
-            subject.clone().verify_with(&RejectingVerifier),
-            Err(EvidenceError::VerificationFailed)
+    fn wrong_git_head_does_not_produce_verified_subject() {
+        let root = std::env::temp_dir().join("apex-evidence-no-such-repository");
+        assert!(
+            GitSourceVerifier::new()
+                .verify_repository(&root, "task-a", 7, "abc123")
+                .is_err()
         );
-        assert!(!subject.is_verified());
     }
 
     #[test]

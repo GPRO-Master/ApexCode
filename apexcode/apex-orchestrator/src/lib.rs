@@ -6,6 +6,7 @@ use apex_evidence::{
     EvidenceRecord, EvidenceRole, EvidenceStatus, EvidenceSubject, GateResult,
 };
 use apex_policy::{PolicyDecision, RiskLevel};
+use apex_runtime_trust::{TrustedExecutionReceipt, VerifiedSource};
 use apex_task_state::{TaskState, TaskStatus};
 use std::fmt;
 
@@ -283,6 +284,7 @@ impl ReleaseDecision {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Workflow {
     subject: EvidenceSubject,
+    source: Option<VerifiedSource>,
     risk: RiskLevel,
     stage: WorkflowStage,
     audit_log: Vec<AuditEntry>,
@@ -316,6 +318,7 @@ impl Workflow {
             })?;
         Ok(Self {
             subject,
+            source: None,
             risk,
             stage: WorkflowStage::Planned,
             audit_log: Vec::new(),
@@ -323,15 +326,15 @@ impl Workflow {
         })
     }
 
-    pub fn from_verified_subject(
-        subject: EvidenceSubject,
+    pub fn from_verified_source(
+        source: &VerifiedSource,
         risk: RiskLevel,
     ) -> Result<Self, OrchestrationError> {
-        if !subject.is_verified() {
-            return Err(OrchestrationError::ProvenanceRequired);
-        }
+        let subject = EvidenceSubject::from_verified_source(source)
+            .map_err(|_| OrchestrationError::ProvenanceRequired)?;
         Ok(Self {
             subject,
+            source: Some(source.clone()),
             risk,
             stage: WorkflowStage::Planned,
             audit_log: Vec::new(),
@@ -341,19 +344,21 @@ impl Workflow {
 
     pub fn from_task_state(
         state: &TaskState,
-        source_revision: impl Into<String>,
+        source: &VerifiedSource,
         risk: RiskLevel,
     ) -> Result<Self, OrchestrationError> {
-        Self::new(
-            state.id().to_string(),
-            state.revision(),
-            source_revision,
-            risk,
-        )
+        if state.id().as_str() != source.task_id() || state.revision() != source.task_revision() {
+            return Err(OrchestrationError::ProvenanceRequired);
+        }
+        Self::from_verified_source(source, risk)
     }
 
     pub fn subject(&self) -> &EvidenceSubject {
         &self.subject
+    }
+
+    pub fn verified_source(&self) -> Option<&VerifiedSource> {
+        self.source.as_ref()
     }
 
     pub const fn risk(&self) -> RiskLevel {
@@ -493,36 +498,16 @@ impl Workflow {
         Ok(())
     }
 
-    pub fn submit_trusted_system_evidence(
+    pub fn submit_trusted_execution_evidence(
         &mut self,
-        principal: impl Into<String>,
+        receipt: &TrustedExecutionReceipt,
         subject: &EvidenceSubject,
         kind: EvidenceKind,
-        status: EvidenceStatus,
         detail: impl Into<String>,
     ) -> Result<(), OrchestrationError> {
         self.require_subject(subject)?;
-        let role = match kind {
-            EvidenceKind::Ci => EvidenceRole::Ci,
-            _ => {
-                return Err(OrchestrationError::ProvenanceRequired);
-            }
-        };
-        let principal = principal.into();
-        if principal.is_empty() {
-            return Err(OrchestrationError::ProvenanceRequired);
-        }
-        let record = EvidenceRecord::with_provenance(
-            kind,
-            status,
-            subject.clone(),
-            detail,
-            EvidenceProvenance::TrustedSystem {
-                id: principal,
-                role,
-            },
-        )
-        .map_err(|_| OrchestrationError::ProvenanceRequired)?;
+        let record = EvidenceRecord::from_trusted_execution(kind, subject.clone(), detail, receipt)
+            .map_err(|_| OrchestrationError::ProvenanceRequired)?;
         self.evidence.push(record);
         Ok(())
     }
@@ -610,7 +595,7 @@ impl Workflow {
         actor: &Actor,
         subject: &EvidenceSubject,
         task_state: &TaskState,
-        source_revision: &str,
+        source: &VerifiedSource,
         evidence: &[EvidenceRecord],
     ) -> Result<(), OrchestrationError> {
         self.require_subject(subject)?;
@@ -635,7 +620,7 @@ impl Workflow {
             return Err(OrchestrationError::SeparationOfDutiesViolation);
         }
         if let ReleaseDecision::Blocked(blockers) =
-            self.release_decision_internal(task_state, source_revision, evidence, false)
+            self.release_decision_internal(task_state, source, evidence, false)
             && !blockers.is_empty()
         {
             return Err(OrchestrationError::ReleaseNotReady(blockers));
@@ -648,17 +633,17 @@ impl Workflow {
     pub fn release_decision(
         &self,
         task_state: &TaskState,
-        source_revision: &str,
+        source: &VerifiedSource,
         evidence: &[EvidenceRecord],
     ) -> ReleaseDecision {
-        self.release_decision_internal(task_state, source_revision, evidence, true)
+        self.release_decision_internal(task_state, source, evidence, true)
     }
 
     pub fn release(
         &mut self,
         actor: &Actor,
         task_state: &TaskState,
-        source_revision: &str,
+        source: &VerifiedSource,
         evidence: &[EvidenceRecord],
     ) -> ReleaseDecision {
         if actor.role != AgentRole::ReleaseAuthority {
@@ -670,7 +655,7 @@ impl Workflow {
         {
             return ReleaseDecision::Blocked(vec![ReleaseBlocker::SeparationOfDutiesViolation]);
         }
-        let decision = self.release_decision(task_state, source_revision, evidence);
+        let decision = self.release_decision(task_state, source, evidence);
         if decision == ReleaseDecision::Allowed {
             self.stage = WorkflowStage::Released;
             self.audit_log.push(self.entry(
@@ -687,7 +672,7 @@ impl Workflow {
     fn release_decision_internal(
         &self,
         task_state: &TaskState,
-        source_revision: &str,
+        source: &VerifiedSource,
         evidence: &[EvidenceRecord],
         require_authority: bool,
     ) -> ReleaseDecision {
@@ -697,9 +682,10 @@ impl Workflow {
         }) {
             push_unique(&mut blockers, ReleaseBlocker::ProvenanceRequired);
         }
-        if task_state.id().as_str() != self.subject.task_id()
-            || task_state.revision() != self.subject.task_revision()
-            || source_revision != self.subject.source_revision()
+        if task_state.id().as_str() != source.task_id()
+            || task_state.revision() != source.task_revision()
+            || source.source_revision() != self.subject.source_revision()
+            || !source.is_current()
         {
             push_unique(&mut blockers, ReleaseBlocker::SourceRevisionMismatch);
         }
@@ -861,7 +847,16 @@ impl Workflow {
                         .is_some_and(|actor| actor.as_str() == id);
                 actor_matches && !implementer_collision
             }
-            EvidenceProvenance::TrustedSystem { .. } => self.evidence.contains(record),
+            EvidenceProvenance::TrustedExecution { receipt } => {
+                self.evidence.contains(record)
+                    && receipt.task_id() == self.subject.task_id()
+                    && receipt.task_revision() == self.subject.task_revision()
+                    && receipt.source_revision() == self.subject.source_revision()
+                    && self
+                        .source
+                        .as_ref()
+                        .is_some_and(|source| receipt.repository_root() == source.repository_root())
+            }
             EvidenceProvenance::Unverified => false,
         }
     }
@@ -906,34 +901,50 @@ mod tests {
     use super::*;
     use apex_evidence::{
         EvidenceKind, EvidenceProvenance, EvidenceRole, EvidenceStatus, EvidenceSubject,
-        SourceVerifier,
     };
-
-    struct FixtureVerifier;
-
-    impl SourceVerifier for FixtureVerifier {
-        fn verify(&self, _task_id: &str, _task_revision: u64, _source_revision: &str) -> bool {
-            true
-        }
-    }
+    use apex_runtime_trust::GitSourceVerifier;
+    use std::{fs, path::PathBuf, process::Command, time::SystemTime};
 
     fn actor(id: &str, role: AgentRole) -> Actor {
         Actor::new(id, role).unwrap()
     }
 
-    fn verified_subject(task_id: &str, revision: u64, source: &str) -> EvidenceSubject {
-        EvidenceSubject::new(task_id, revision, source)
+    fn verified_source(task_id: &str, revision: u64, label: &str) -> VerifiedSource {
+        let suffix = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
             .unwrap()
-            .verify_with(&FixtureVerifier)
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("apex-orchestrator-{suffix}"));
+        fs::create_dir_all(&root).unwrap();
+        run_git(&root, &["init", "-q"]);
+        run_git(
+            &root,
+            &["config", "user.email", "orchestrator@example.invalid"],
+        );
+        run_git(&root, &["config", "user.name", "Apex Orchestrator"]);
+        fs::write(root.join("fixture.txt"), label).unwrap();
+        run_git(&root, &["add", "."]);
+        run_git(&root, &["commit", "-qm", label]);
+        let head = run_git(&root, &["rev-parse", "HEAD"]);
+        GitSourceVerifier::new()
+            .verify_repository(root, task_id, revision, head)
             .unwrap()
     }
 
-    fn verified_workflow(state: &TaskState, source_revision: &str, risk: RiskLevel) -> Workflow {
-        Workflow::from_verified_subject(
-            verified_subject(state.id().as_str(), state.revision(), source_revision),
-            risk,
-        )
-        .unwrap()
+    fn run_git(root: &PathBuf, args: &[&str]) -> String {
+        let output = Command::new("git")
+            .arg("-C")
+            .arg(root)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "git failed");
+        String::from_utf8_lossy(&output.stdout).trim().to_owned()
+    }
+
+    fn verified_workflow(state: &TaskState, source_label: &str, risk: RiskLevel) -> Workflow {
+        let source = verified_source(state.id().as_str(), state.revision(), source_label);
+        Workflow::from_verified_source(&source, risk).unwrap()
     }
 
     fn ready_task() -> TaskState {
@@ -954,10 +965,7 @@ mod tests {
                 id: "tester".into(),
                 role: EvidenceRole::Tester,
             },
-            EvidenceKind::Ci => EvidenceProvenance::TrustedSystem {
-                id: "ci".into(),
-                role: EvidenceRole::Ci,
-            },
+            EvidenceKind::Ci => EvidenceProvenance::Unverified,
             EvidenceKind::Security => EvidenceProvenance::Actor {
                 id: "security".into(),
                 role: EvidenceRole::Security,
@@ -972,21 +980,25 @@ mod tests {
             .unwrap()
     }
 
-    fn all_ready_evidence(subject: &EvidenceSubject) -> Vec<EvidenceRecord> {
-        [
-            EvidenceKind::Test,
-            EvidenceKind::Ci,
+    fn all_ready_evidence(workflow: &Workflow) -> Vec<EvidenceRecord> {
+        let subject = workflow.subject();
+        let mut records = workflow.evidence().to_vec();
+        records.push(evidence(
+            subject,
             EvidenceKind::Security,
+            EvidenceStatus::Pass,
+        ));
+        records.push(evidence(
+            subject,
             EvidenceKind::Review,
-        ]
-        .into_iter()
-        .map(|kind| evidence(subject, kind, EvidenceStatus::Pass))
-        .collect()
+            EvidenceStatus::Pass,
+        ));
+        records
     }
 
     fn staged_workflow(
         risk: RiskLevel,
-        authorize: bool,
+        _authorize: bool,
     ) -> (Workflow, TaskState, Actor, Actor, Actor, Actor) {
         let state = ready_task();
         let mut workflow = verified_workflow(&state, "sha-a", risk);
@@ -1006,7 +1018,13 @@ mod tests {
             .transition(&implementer, WorkflowStage::Testing)
             .unwrap();
         workflow
-            .submit_test_evidence(&actor("tester", AgentRole::Tester), &subject)
+            .submit_evidence(
+                &actor("tester", AgentRole::Tester),
+                &subject,
+                EvidenceKind::Test,
+                EvidenceStatus::Pass,
+                "fixture",
+            )
             .unwrap();
         workflow
             .transition(&reviewer, WorkflowStage::Reviewing)
@@ -1023,28 +1041,8 @@ mod tests {
             .unwrap();
         workflow.prepare_release(&devops, &subject).unwrap();
         workflow
-            .submit_trusted_system_evidence(
-                "ci",
-                &subject,
-                EvidenceKind::Ci,
-                EvidenceStatus::Pass,
-                "fixture",
-            )
-            .unwrap();
-        workflow
             .transition(&authority, WorkflowStage::ReadyForRelease)
             .unwrap();
-        if authorize && risk != RiskLevel::R5 {
-            workflow
-                .authorize_release(
-                    &authority,
-                    &subject,
-                    &state,
-                    "sha-a",
-                    &all_ready_evidence(&subject),
-                )
-                .unwrap();
-        }
         (workflow, state, implementer, reviewer, security, devops)
     }
 
@@ -1093,8 +1091,9 @@ mod tests {
         let (mut workflow, state, _, _, _, devops) = staged_workflow(RiskLevel::R4, false);
         let same_identity = Actor::new(devops.id.as_str(), AgentRole::ReleaseAuthority).unwrap();
         let subject = workflow.subject().clone();
+        let source = workflow.verified_source().unwrap().clone();
         assert_eq!(
-            workflow.authorize_release(&same_identity, &subject, &state, "sha-a", &[]),
+            workflow.authorize_release(&same_identity, &subject, &state, &source, &[]),
             Err(OrchestrationError::SeparationOfDutiesViolation)
         );
     }
@@ -1193,13 +1192,15 @@ mod tests {
         workflow
             .transition(&authority, WorkflowStage::ReadyForRelease)
             .unwrap();
+        let source = workflow.verified_source().unwrap().clone();
+        let release_evidence = all_ready_evidence(&workflow);
         assert!(matches!(
             workflow.authorize_release(
                 &authority,
                 &subject,
                 &state,
-                "sha-a",
-                &all_ready_evidence(&subject),
+                &source,
+                &release_evidence,
             ),
             Err(OrchestrationError::ReleaseNotReady(blockers))
                 if blockers.contains(&ReleaseBlocker::SeparationOfDutiesViolation)
@@ -1212,8 +1213,9 @@ mod tests {
         let mut workflow = verified_workflow(&state, "sha-a", RiskLevel::R4);
         let authority = actor("authority", AgentRole::ReleaseAuthority);
         let subject = workflow.subject().clone();
+        let source = workflow.verified_source().unwrap().clone();
         assert!(matches!(
-            workflow.authorize_release(&authority, &subject, &state, "sha-a", &[]),
+            workflow.authorize_release(&authority, &subject, &state, &source, &[]),
             Err(OrchestrationError::ReleaseNotReady(blockers))
                 if blockers.contains(&ReleaseBlocker::TaskNotReady)
         ));
@@ -1275,31 +1277,58 @@ mod tests {
     #[test]
     fn raw_subject_cannot_authorize_release() {
         let state = ready_task();
-        let workflow = Workflow::from_task_state(&state, "sha-a", RiskLevel::R4).unwrap();
+        let source = verified_source(state.id().as_str(), state.revision(), "raw-subject");
+        let workflow = Workflow::new(
+            state.id().to_string(),
+            state.revision(),
+            source.source_revision(),
+            RiskLevel::R4,
+        )
+        .unwrap();
         assert!(matches!(
-            workflow.release_decision(&state, "sha-a", &[]),
+            workflow.release_decision(&state, &source, &[]),
             ReleaseDecision::Blocked(blockers)
                 if blockers.contains(&ReleaseBlocker::ProvenanceRequired)
         ));
     }
 
     #[test]
-    fn release_authority_can_authorize_after_all_gates_pass() {
+    fn release_authority_cannot_bypass_unavailable_ci() {
         let (workflow, state, _, _, _, _) = staged_workflow(RiskLevel::R4, true);
-        let result =
-            workflow.release_decision(&state, "sha-a", &all_ready_evidence(workflow.subject()));
-        assert_eq!(result, ReleaseDecision::Allowed);
+        let result = workflow.release_decision(
+            &state,
+            workflow.verified_source().unwrap(),
+            &all_ready_evidence(&workflow),
+        );
+        assert!(matches!(
+            result,
+            ReleaseDecision::Blocked(blockers) if blockers.contains(&ReleaseBlocker::EvidenceIncomplete)
+        ));
+    }
+
+    #[test]
+    fn ci_unavailable_blocks_ready_claim() {
+        let (workflow, state, _, _, _, _) = staged_workflow(RiskLevel::R4, true);
+        let evidence = all_ready_evidence(&workflow)
+            .into_iter()
+            .filter(|record| record.kind() != EvidenceKind::Ci)
+            .collect::<Vec<_>>();
+        assert!(matches!(
+            workflow.release_decision(&state, workflow.verified_source().unwrap(), &evidence),
+            ReleaseDecision::Blocked(blockers)
+                if blockers.contains(&ReleaseBlocker::EvidenceIncomplete)
+        ));
     }
 
     #[test]
     fn missing_test_evidence_blocks_release() {
         let (workflow, state, _, _, _, _) = staged_workflow(RiskLevel::R4, true);
-        let evidence = all_ready_evidence(workflow.subject())
+        let evidence = all_ready_evidence(&workflow)
             .into_iter()
             .filter(|record| record.kind() != EvidenceKind::Test)
             .collect::<Vec<_>>();
         assert!(matches!(
-            workflow.release_decision(&state, "sha-a", &evidence),
+            workflow.release_decision(&state, workflow.verified_source().unwrap(), &evidence),
             ReleaseDecision::Blocked(blockers) if blockers.contains(&ReleaseBlocker::EvidenceIncomplete)
         ));
     }
@@ -1307,7 +1336,7 @@ mod tests {
     #[test]
     fn failed_security_evidence_blocks_release() {
         let (workflow, state, _, _, _, _) = staged_workflow(RiskLevel::R4, true);
-        let mut records = all_ready_evidence(workflow.subject());
+        let mut records = all_ready_evidence(&workflow);
         records.retain(|record| record.kind() != EvidenceKind::Security);
         records.push(evidence(
             workflow.subject(),
@@ -1315,7 +1344,7 @@ mod tests {
             EvidenceStatus::Fail,
         ));
         assert!(matches!(
-            workflow.release_decision(&state, "sha-a", &records),
+            workflow.release_decision(&state, workflow.verified_source().unwrap(), &records),
             ReleaseDecision::Blocked(blockers) if blockers.contains(&ReleaseBlocker::EvidenceIncomplete)
         ));
     }
@@ -1323,14 +1352,15 @@ mod tests {
     #[test]
     fn stale_source_evidence_blocks_release() {
         let (workflow, state, _, _, _, _) = staged_workflow(RiskLevel::R4, true);
-        let stale = EvidenceSubject::new("task-1", state.revision(), "sha-b").unwrap();
-        let evidence = all_ready_evidence(workflow.subject())
+        let stale_source = verified_source(state.id().as_str(), state.revision(), "sha-b");
+        let stale = EvidenceSubject::from_verified_source(&stale_source).unwrap();
+        let evidence = all_ready_evidence(&workflow)
             .into_iter()
             .filter(|record| record.kind() != EvidenceKind::Review)
             .chain([evidence(&stale, EvidenceKind::Review, EvidenceStatus::Pass)])
             .collect::<Vec<_>>();
         assert!(matches!(
-            workflow.release_decision(&state, "sha-a", &evidence),
+            workflow.release_decision(&state, workflow.verified_source().unwrap(), &evidence),
             ReleaseDecision::Blocked(blockers) if blockers.contains(&ReleaseBlocker::SourceRevisionMismatch)
         ));
     }
@@ -1340,7 +1370,11 @@ mod tests {
         let (workflow, mut state, _, _, _, _) = staged_workflow(RiskLevel::R4, true);
         state.transition(TaskStatus::Running).unwrap();
         assert!(matches!(
-            workflow.release_decision(&state, "sha-a", &all_ready_evidence(workflow.subject())),
+            workflow.release_decision(
+                &state,
+                workflow.verified_source().unwrap(),
+                &all_ready_evidence(&workflow)
+            ),
             ReleaseDecision::Blocked(blockers) if blockers.contains(&ReleaseBlocker::SourceRevisionMismatch)
         ));
     }
@@ -1349,7 +1383,11 @@ mod tests {
     fn r4_requires_explicit_release_authority() {
         let (workflow, state, _, _, _, _) = staged_workflow(RiskLevel::R4, false);
         assert!(matches!(
-            workflow.release_decision(&state, "sha-a", &all_ready_evidence(workflow.subject())),
+            workflow.release_decision(
+                &state,
+                workflow.verified_source().unwrap(),
+                &all_ready_evidence(&workflow)
+            ),
             ReleaseDecision::Blocked(blockers)
                 if blockers.contains(&ReleaseBlocker::ReleaseAuthorityMissing)
                     && blockers.contains(&ReleaseBlocker::ProductionApprovalRequired)
@@ -1360,7 +1398,11 @@ mod tests {
     fn r5_is_denied_by_default() {
         let (workflow, state, _, _, _, _) = staged_workflow(RiskLevel::R5, true);
         assert!(matches!(
-            workflow.release_decision(&state, "sha-a", &all_ready_evidence(workflow.subject())),
+            workflow.release_decision(
+                &state,
+                workflow.verified_source().unwrap(),
+                &all_ready_evidence(&workflow)
+            ),
             ReleaseDecision::Blocked(blockers) if blockers.contains(&ReleaseBlocker::PolicyDenied)
         ));
     }
@@ -1382,24 +1424,16 @@ mod tests {
     }
 
     #[test]
-    fn released_state_is_terminal() {
+    fn unavailable_ci_prevents_released_state() {
         let (mut workflow, state, _, _, _, _) = staged_workflow(RiskLevel::R2, true);
         let authority = actor("authority", AgentRole::ReleaseAuthority);
+        let source = workflow.verified_source().unwrap().clone();
+        let release_evidence = all_ready_evidence(&workflow);
         assert_eq!(
-            workflow.release(
-                &authority,
-                &state,
-                "sha-a",
-                &all_ready_evidence(workflow.subject())
-            ),
-            ReleaseDecision::Allowed
+            workflow.release(&authority, &state, &source, &release_evidence,),
+            ReleaseDecision::Blocked(vec![ReleaseBlocker::EvidenceIncomplete])
         );
-        assert!(
-            workflow
-                .transition(&authority, WorkflowStage::Blocked)
-                .is_err()
-        );
-        assert_eq!(workflow.stage(), WorkflowStage::Released);
+        assert_eq!(workflow.stage(), WorkflowStage::ReadyForRelease);
     }
 
     #[test]
@@ -1420,14 +1454,16 @@ mod tests {
     #[test]
     fn task_revision_change_invalidates_previous_release_readiness() {
         let (workflow, mut state, _, _, _, _) = staged_workflow(RiskLevel::R4, true);
-        let old_evidence = all_ready_evidence(workflow.subject());
-        assert_eq!(
-            workflow.release_decision(&state, "sha-a", &old_evidence),
-            ReleaseDecision::Allowed
-        );
+        let old_evidence = all_ready_evidence(&workflow);
+        let source = workflow.verified_source().unwrap().clone();
+        assert!(matches!(
+            workflow.release_decision(&state, &source, &old_evidence),
+            ReleaseDecision::Blocked(blockers)
+                if blockers.contains(&ReleaseBlocker::EvidenceIncomplete)
+        ));
         state.transition(TaskStatus::Running).unwrap();
         assert!(matches!(
-            workflow.release_decision(&state, "sha-a", &old_evidence),
+            workflow.release_decision(&state, &source, &old_evidence),
             ReleaseDecision::Blocked(blockers) if blockers.contains(&ReleaseBlocker::SourceRevisionMismatch)
         ));
     }
@@ -1435,8 +1471,9 @@ mod tests {
     #[test]
     fn source_sha_change_invalidates_previous_release_readiness() {
         let (workflow, state, _, _, _, _) = staged_workflow(RiskLevel::R4, true);
+        let changed_source = verified_source(state.id().as_str(), state.revision(), "sha-b");
         assert!(matches!(
-            workflow.release_decision(&state, "sha-b", &all_ready_evidence(workflow.subject())),
+            workflow.release_decision(&state, &changed_source, &all_ready_evidence(&workflow)),
             ReleaseDecision::Blocked(blockers) if blockers.contains(&ReleaseBlocker::SourceRevisionMismatch)
         ));
     }
@@ -1461,6 +1498,11 @@ mod tests {
         let mut workflow = verified_workflow(&state, "sha-a", RiskLevel::R2);
         let implementer = actor("impl-1", AgentRole::Implementer);
         let subject = workflow.subject().clone();
+        let source_revision = workflow
+            .verified_source()
+            .unwrap()
+            .source_revision()
+            .to_owned();
         workflow
             .submit_implementation(&implementer, &subject)
             .unwrap();
@@ -1471,7 +1513,7 @@ mod tests {
                 role: AgentRole::Implementer,
                 action: WorkflowAction::SubmitImplementation,
                 task_revision: state.revision(),
-                source_revision: "sha-a".into(),
+                source_revision,
             })
         );
     }

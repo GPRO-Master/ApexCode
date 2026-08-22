@@ -12,4 +12,5 @@ path = "src/lib.rs"
 [dependencies]
 apex-evidence = { path = "../apex-evidence" }
 apex-policy = { path = "../apex-policy" }
+apex-runtime-trust = { path = "../apex-runtime-trust" }
 apex-task-state = { path = "../apex-task-state" }
