@@ -123,6 +123,8 @@ jobs:
           cargo test -p codex-core --features apex-runtime-adapter --test all suite::unified_exec -- --test-threads=1
           cargo test -p codex-core --features apex-runtime-adapter --test all suite::approvals -- --test-threads=1
           cargo test -p codex-app-server --features apex-runtime-adapter --test all suite::v2::command_exec -- --test-threads=1
+        env:
+          RUST_MIN_STACK: "8388608"
       - name: Restore Cargo lockfile after focused validation
         if: always() && !cancelled()
         run: cp "$RUNNER_TEMP/apex-focused/Cargo.lock" Cargo.lock
