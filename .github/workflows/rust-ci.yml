@@ -105,6 +105,8 @@ jobs:
         run: cargo build -p codex-linux-sandbox
       - name: Run Apex runtime adapter tests
         run: cargo test --manifest-path ../apexcode/Cargo.toml -p apex-runtime-adapter --lib -- --test-threads=1
+      - name: Run repository-native sandbox boundary probe
+        run: cargo test -p codex-linux-sandbox --test all suite::landlock::test_root_read -- --test-threads=1
       - name: Run feature-disabled execution preservation regression
         run: cargo test -p codex-core --lib exec_command_preserves_normal_execution_result -- --test-threads=1
       - name: Run feature-enabled observer boundary regression
