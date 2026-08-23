@@ -2750,6 +2750,7 @@ name = "codex-core"
 version = "0.0.0"
 dependencies = [
  "anyhow",
+ "apex-runtime-adapter",
  "arc-swap",
  "assert_cmd",
  "assert_matches",
@@ -5084,6 +5085,7 @@ dependencies = [
  "codex-model-provider-info",
  "codex-models-manager",
  "codex-protocol",
+ "codex-sandboxing",
  "codex-thread-store",
  "codex-utils-absolute-path",
  "codex-utils-cargo-bin",

@@ -22,6 +22,12 @@ use crate::tools::hook_names::HookToolName;
 use crate::tools::registry::CoreToolRuntime;
 use crate::tools::registry::ToolExecutor;
 use crate::turn_diff_tracker::TurnDiffTracker;
+#[cfg(target_os = "linux")]
+use codex_http_client::HttpClientFactory;
+#[cfg(target_os = "linux")]
+use codex_http_client::OutboundProxyPolicy;
+#[cfg(target_os = "linux")]
+use core_test_support::find_codex_linux_sandbox_exe;
 use tokio::sync::Mutex;
 
 const TEST_TRUNCATION_POLICY: TruncationPolicy = TruncationPolicy::Tokens(10_000);
@@ -31,7 +37,43 @@ async fn invocation_for_payload(
     call_id: &str,
     payload: ToolPayload,
 ) -> ToolInvocation {
-    let (session, turn) = make_session_and_context().await;
+    let (session, mut turn) = make_session_and_context().await;
+    #[cfg(target_os = "linux")]
+    {
+        let sandbox_helper =
+            find_codex_linux_sandbox_exe().expect("codex-linux-sandbox should be discoverable");
+        let runtime_paths = codex_exec_server::ExecServerRuntimePaths::new(
+            std::env::current_exe().expect("test executable should be discoverable"),
+            Some(sandbox_helper),
+        )
+        .expect("test runtime paths should be absolute");
+        let environment = Arc::new(
+            Environment::create(
+                None,
+                runtime_paths,
+                HttpClientFactory::new(OutboundProxyPolicy::ReqwestDefault),
+            )
+            .expect("test environment should use the repository-native sandbox helper"),
+        );
+        let Some(TurnEnvironmentState::Ready(turn_environment)) =
+            turn.environments.environments.first_mut()
+        else {
+            panic!("primary test environment should be ready");
+        };
+        turn_environment.environment = environment;
+
+        let mut config = (*turn.config).clone();
+        config.codex_linux_sandbox_exe = turn_environment
+            .environment
+            .local_runtime_paths()
+            .and_then(|paths| {
+                paths
+                    .codex_linux_sandbox_exe
+                    .as_ref()
+                    .map(|path| path.to_path_buf())
+            });
+        turn.config = Arc::new(config);
+    }
     let turn = Arc::new(turn);
     ToolInvocation {
         session: session.into(),
@@ -212,6 +254,37 @@ async fn exec_command_rejects_login_when_selected_environment_disallows_it() {
     assert_eq!(
         message,
         "login shell is disabled by config; omit `login` or set it to false."
+    );
+}
+
+#[tokio::test]
+async fn exec_command_preserves_normal_execution_result() {
+    let payload = ToolPayload::Function {
+        arguments: serde_json::json!({
+            "cmd": "ls",
+        })
+        .to_string(),
+    };
+    let invocation =
+        invocation_for_payload("exec_command", "observer-exec-call", payload.clone()).await;
+
+    let output = ExecCommandHandler::default()
+        .handle(invocation)
+        .await
+        .expect("observation must not change normal exec behavior");
+
+    let result = output.code_mode_result(&payload);
+    assert_eq!(
+        result["exit_code"],
+        serde_json::json!(0),
+        "normal execution result: {result}"
+    );
+    assert!(
+        result["output"]
+            .as_str()
+            .expect("execution result output should be text")
+            .contains("Cargo.toml"),
+        "normal execution output: {result}"
     );
 }
 

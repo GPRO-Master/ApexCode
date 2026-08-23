@@ -8,6 +8,9 @@ version.workspace = true
 name = "codex_core"
 path = "src/lib.rs"
 
+[features]
+apex-runtime-adapter = ["dep:apex-runtime-adapter"]
+
 [[bin]]
 name = "codex-write-config-schema"
 path = "src/bin/config_schema.rs"
@@ -17,6 +20,7 @@ workspace = true
 
 [dependencies]
 anyhow = { workspace = true }
+apex-runtime-adapter = { package = "apex-runtime-adapter", path = "../../apexcode/apex-runtime-adapter", optional = true }
 arc-swap = { workspace = true }
 async-channel = { workspace = true }
 base64 = { workspace = true }

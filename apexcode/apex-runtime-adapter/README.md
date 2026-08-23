@@ -13,3 +13,19 @@ reach that processor.
 The adapter does not create evidence, approvals, trusted execution receipts,
 or release authority. It records only bounded request identity and gate
 metadata; file paths and file contents are not included in `GateRecord`.
+
+## v0.2a exec observation
+
+The optional `apex-runtime-adapter` feature in `codex-core` observes the
+resolved `exec_command` representation immediately before
+`UnifiedExecProcessManager::exec_command`. It classifies only high-confidence
+command shapes, including shell wrappers, and reports `Unknown` for compound
+or unsupported syntax.
+
+This phase is observation-only. The classifier cannot alter commands,
+arguments, cwd, approvals, sandbox permissions, or execution results. Apex
+failure therefore leaves the existing Codex behavior authoritative. Aggregate
+classification counters are emitted through session telemetry. Bounded,
+sanitized stderr diagnostics are available only when
+`APEXCODE_EXEC_OBSERVATION_DEBUG=1` or `true` is explicitly set; environment
+secrets, stdin, full environment state, and file contents are never recorded.
