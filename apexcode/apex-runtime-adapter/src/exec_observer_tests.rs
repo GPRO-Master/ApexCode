@@ -113,6 +113,53 @@ fn observations_are_bounded_and_redact_secret_like_arguments() {
 }
 
 #[test]
+fn diagnostics_redact_validated_secret_forms() {
+    let cases = [
+        ("DB_PASS=hunter2", "hunter2"),
+        ("db_password=secret123", "secret123"),
+        ("Authorization: Bearer abc123", "abc123"),
+        ("Bearer very-secret-token", "very-secret-token"),
+        ("https://user:password@example.com/path", "password"),
+        (
+            "sk-live-a1b2c3d4e5f6g7h8i9j0",
+            "sk-live-a1b2c3d4e5f6g7h8i9j0",
+        ),
+        (
+            "-----BEGIN PRIVATE KEY----- secret-material",
+            "secret-material",
+        ),
+    ];
+
+    for (argument, secret) in cases {
+        let command = vec!["bash".to_string(), "-c".to_string(), argument.to_string()];
+        let diagnostic =
+            observe_exec_command("call-1", &command, "/repo", "bash").diagnostic_line();
+        assert!(!diagnostic.contains(secret), "secret leaked for {argument}");
+    }
+}
+
+#[test]
+fn diagnostics_escape_control_characters_without_losing_safe_arguments() {
+    let command = vec![
+        "bash".to_string(),
+        "-c".to_string(),
+        "rg --files".to_string(),
+        "src/main.rs\n\t\u{1b}[31m".to_string(),
+        "--version".to_string(),
+    ];
+    let observation = observe_exec_command("call-1", &command, "/repo", "bash");
+    let diagnostic = observation.diagnostic_line();
+
+    assert_eq!(observation.classification(), ExecClassification::ReadOnly);
+    assert!(diagnostic.contains("src/main.rs"));
+    assert!(diagnostic.contains("--version"));
+    assert_eq!(diagnostic.lines().count(), 1);
+    assert!(!diagnostic.contains('\n'));
+    assert!(!diagnostic.contains('\r'));
+    assert!(!diagnostic.contains('\u{1b}'));
+}
+
+#[test]
 fn diagnostic_mode_is_disabled_by_default() {
     assert!(!diagnostics_enabled());
 }

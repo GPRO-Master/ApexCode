@@ -2,6 +2,7 @@ use super::ExecClassification;
 use super::ExecConfidence;
 use super::ExecExecutionMode;
 use super::ExecShellKind;
+use url::Url;
 
 const MAX_ARGUMENT_BYTES: usize = 512;
 const MAX_ARGUMENT_COUNT: usize = 64;
@@ -250,18 +251,112 @@ pub(super) fn sanitize_args(arguments: &[String]) -> Vec<String> {
 
 fn sanitize_argument(argument: &str) -> String {
     let lower = argument.to_ascii_lowercase();
-    if lower.contains("token")
-        || lower.contains("secret")
-        || lower.contains("password")
-        || lower.contains("api_key")
-        || lower.contains("api-key")
-        || lower.contains("bearer ")
-        || lower.contains("authorization:")
-        || lower.contains("cookie:")
+    if contains_sensitive_assignment(argument)
+        || contains_authorization_value(&lower)
+        || contains_url_credentials(argument)
+        || contains_private_key_marker(&lower)
+        || contains_opaque_secret(argument)
     {
         return "<redacted-secret>".to_string();
     }
-    bounded_text(argument.to_string(), MAX_ARGUMENT_BYTES)
+    bounded_text(argument.escape_debug().to_string(), MAX_ARGUMENT_BYTES)
+}
+
+fn contains_sensitive_assignment(argument: &str) -> bool {
+    const SENSITIVE_KEYS: &[&str] = &[
+        "password",
+        "pass",
+        "passwd",
+        "db_pass",
+        "db_password",
+        "token",
+        "api_key",
+        "apikey",
+        "secret",
+        "client_secret",
+        "access_token",
+        "refresh_token",
+        "auth_token",
+    ];
+
+    argument.split_whitespace().any(|token| {
+        let Some((key, _)) = token.split_once('=') else {
+            return false;
+        };
+        let key = key.trim_start_matches('-').to_ascii_lowercase();
+        SENSITIVE_KEYS.contains(&key.as_str())
+    })
+}
+
+fn contains_authorization_value(lower: &str) -> bool {
+    lower.contains("authorization:") || lower.contains("bearer ")
+}
+
+fn contains_url_credentials(argument: &str) -> bool {
+    argument.split_whitespace().any(|token| {
+        let token = token.trim_matches(['\'', '"', '(', ')', '[', ']', ',', ';']);
+        let token = token.strip_prefix("--url=").unwrap_or(token);
+        Url::parse(token).is_ok_and(|url| {
+            matches!(url.scheme(), "http" | "https")
+                && (!url.username().is_empty() || url.password().is_some())
+        })
+    })
+}
+
+fn contains_private_key_marker(lower: &str) -> bool {
+    lower.contains("-----begin private key-----")
+        || lower.contains("-----begin rsa private key-----")
+        || lower.contains("-----begin openssh private key-----")
+}
+
+fn contains_opaque_secret(argument: &str) -> bool {
+    argument.split_whitespace().any(|token| {
+        let token = token.trim_matches(['\'', '"', '(', ')', '[', ']', ',', ';']);
+        is_opaque_secret_token(token)
+    })
+}
+
+fn is_opaque_secret_token(token: &str) -> bool {
+    let known_prefix = [
+        "sk-",
+        "pk-",
+        "ghp_",
+        "github_pat_",
+        "xoxb-",
+        "xoxp-",
+        "akia",
+    ];
+    if known_prefix
+        .iter()
+        .any(|prefix| token.to_ascii_lowercase().starts_with(prefix))
+    {
+        return token.len() >= 16;
+    }
+
+    if token.len() < 24 || token.contains(['/', '\\', '.', '=']) {
+        return false;
+    }
+
+    let has_lower = token
+        .chars()
+        .any(|character| character.is_ascii_lowercase());
+    let has_upper = token
+        .chars()
+        .any(|character| character.is_ascii_uppercase());
+    let has_digit = token.chars().any(|character| character.is_ascii_digit());
+    let has_symbol = token
+        .chars()
+        .any(|character| matches!(character, '-' | '_'));
+    let distinct = token
+        .chars()
+        .collect::<std::collections::HashSet<_>>()
+        .len();
+    [has_lower, has_upper, has_digit, has_symbol]
+        .into_iter()
+        .filter(|present| *present)
+        .count()
+        >= 3
+        && distinct >= 12
 }
 
 pub(super) fn bounded_text(value: String, limit: usize) -> String {

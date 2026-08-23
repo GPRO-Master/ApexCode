@@ -11,3 +11,4 @@ path = "src/lib.rs"
 
 [dependencies]
 apex-policy = { path = "../apex-policy" }
+url = { version = "2", default-features = false }
