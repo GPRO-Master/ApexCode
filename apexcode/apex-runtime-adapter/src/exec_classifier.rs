@@ -252,6 +252,7 @@ pub(super) fn sanitize_args(arguments: &[String]) -> Vec<String> {
             || contains_sensitive_flag_value(argument)
             || contains_authorization_value(&argument.to_ascii_lowercase())
             || contains_url_credentials(argument)
+            || contains_userinfo_credentials(argument)
             || contains_private_key_marker(&argument.to_ascii_lowercase())
             || contains_opaque_secret(argument)
         {
@@ -278,6 +279,7 @@ pub(super) fn sanitize_text(argument: &str, limit: usize) -> String {
         || contains_sensitive_flag_value(argument)
         || contains_authorization_value(&lower)
         || contains_url_credentials(argument)
+        || contains_userinfo_credentials(argument)
         || contains_private_key_marker(&lower)
         || contains_opaque_secret(argument)
     {
@@ -394,6 +396,19 @@ fn contains_url_credentials(argument: &str) -> bool {
             .split_once('@')
             .is_some_and(|(userinfo, _)| userinfo.contains(':'))
     })
+}
+
+fn contains_userinfo_credentials(argument: &str) -> bool {
+    let token = argument
+        .trim_matches(['\'', '"', '(', ')', '[', ']', ',', ';'])
+        .trim();
+    if token.is_empty() || token.starts_with('-') || token.contains("://") {
+        return false;
+    }
+    let Some((username, password)) = token.split_once(':') else {
+        return false;
+    };
+    !username.is_empty() && !password.is_empty() && !username.chars().any(char::is_whitespace)
 }
 
 fn contains_private_key_marker(lower: &str) -> bool {
