@@ -585,6 +585,9 @@ inherits = "test"
 opt-level = 0
 
 [patch.crates-io]
+# Keep the external Apex workspace path visible to rules_rs when resolving the
+# optional runtime-adapter dependency from Codex crates.
+apex-policy = { path = "../apexcode/apex-policy" }
 # Uncomment to debug local changes.
 # ratatui = { path = "../../ratatui" }
 crossterm = { git = "https://github.com/openai-oss-forks/crossterm", rev = "45fecb9508105988f42fe6ff0441783ed3717f92" }
