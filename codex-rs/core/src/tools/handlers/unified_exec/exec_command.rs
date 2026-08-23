@@ -375,7 +375,11 @@ impl ExecCommandHandler {
                 &[("classification", observation.classification().as_str())],
             );
             if apex_runtime_adapter::diagnostics_enabled() {
-                eprintln!("Apex exec observation: {}", observation.diagnostic_line());
+                tracing::debug!(
+                    target: "apex_runtime_adapter",
+                    observation = %observation.diagnostic_line(),
+                    "Apex exec observation"
+                );
             }
         }
 
