@@ -23,6 +23,8 @@ use crate::tools::hook_names::HookToolName;
 use crate::tools::registry::CoreToolRuntime;
 use crate::tools::registry::ToolExecutor;
 use crate::turn_diff_tracker::TurnDiffTracker;
+#[cfg(target_os = "linux")]
+use core_test_support::find_codex_linux_sandbox_exe;
 use tokio::sync::Mutex;
 
 const TEST_TRUNCATION_POLICY: TruncationPolicy = TruncationPolicy::Tokens(10_000);
@@ -32,7 +34,15 @@ async fn invocation_for_payload(
     call_id: &str,
     payload: ToolPayload,
 ) -> ToolInvocation {
-    let (session, turn) = make_session_and_context().await;
+    let (session, mut turn) = make_session_and_context().await;
+    #[cfg(target_os = "linux")]
+    {
+        let mut config = (*turn.config).clone();
+        config.codex_linux_sandbox_exe = Some(
+            find_codex_linux_sandbox_exe().expect("codex-linux-sandbox should be discoverable"),
+        );
+        turn.config = Arc::new(config);
+    }
     let turn = Arc::new(turn);
     ToolInvocation {
         session: session.into(),
@@ -224,7 +234,7 @@ async fn exec_command_observer_preserves_normal_execution_result() {
         "observer-exec-call",
         ToolPayload::Function {
             arguments: serde_json::json!({
-                "cmd": "echo APEX_EXEC_OBSERVER_EXECUTED",
+                "cmd": "ls",
             })
             .to_string(),
         },
@@ -236,7 +246,7 @@ async fn exec_command_observer_preserves_normal_execution_result() {
         .await
         .expect("observation must not change normal exec behavior");
 
-    assert!(output.log_output().contains("APEX_EXEC_OBSERVER_EXECUTED"));
+    assert!(output.log_output().contains("Cargo.toml"));
 }
 
 #[test]
