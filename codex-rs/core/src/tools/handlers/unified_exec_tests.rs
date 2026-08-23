@@ -242,7 +242,11 @@ async fn exec_command_preserves_normal_execution_result() {
         .expect("observation must not change normal exec behavior");
 
     let result = output.code_mode_result(&payload);
-    assert_eq!(result["exit_code"], serde_json::json!(0));
+    assert_eq!(
+        result["exit_code"],
+        serde_json::json!(0),
+        "normal execution result: {result}"
+    );
     assert_eq!(
         result["output"]
             .as_str()
