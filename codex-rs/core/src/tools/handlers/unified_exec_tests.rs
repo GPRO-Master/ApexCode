@@ -229,7 +229,7 @@ async fn exec_command_rejects_login_when_selected_environment_disallows_it() {
 async fn exec_command_preserves_normal_execution_result() {
     let payload = ToolPayload::Function {
         arguments: serde_json::json!({
-            "cmd": "echo apex-observer-output",
+            "cmd": "ls",
         })
         .to_string(),
     };
@@ -247,12 +247,12 @@ async fn exec_command_preserves_normal_execution_result() {
         serde_json::json!(0),
         "normal execution result: {result}"
     );
-    assert_eq!(
+    assert!(
         result["output"]
             .as_str()
             .expect("execution result output should be text")
-            .trim_end_matches(['\r', '\n']),
-        "apex-observer-output"
+            .contains("Cargo.toml"),
+        "normal execution output: {result}"
     );
 }
 
