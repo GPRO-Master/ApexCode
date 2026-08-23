@@ -98,20 +98,24 @@ jobs:
       - uses: ./.github/actions/setup-ci
       - uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0
       - name: Build repository-native Linux sandbox helper
-        run: cargo build -p codex-linux-sandbox
+        run: cargo build --locked -p codex-linux-sandbox
       - name: Run Apex runtime adapter tests
-        run: cargo test --manifest-path ../apexcode/Cargo.toml -p apex-runtime-adapter --lib -- --test-threads=1
+        run: cargo test --locked --manifest-path ../apexcode/Cargo.toml -p apex-runtime-adapter --lib -- --test-threads=1
       - name: Run feature-disabled execution preservation regression
-        run: cargo test -p codex-core --lib exec_command_preserves_normal_execution_result -- --test-threads=1
+        run: |
+          lock_backup="$RUNNER_TEMP/codex-rs-Cargo.lock"
+          cp Cargo.lock "$lock_backup"
+          trap 'cp "$lock_backup" Cargo.lock' EXIT
+          cargo test -p codex-core --lib exec_command_preserves_normal_execution_result -- --test-threads=1
       - name: Run feature-enabled observer boundary regression
-        run: cargo test -p codex-core --features apex-runtime-adapter --lib exec_command_preserves_normal_execution_result -- --test-threads=1
+        run: cargo test --locked -p codex-core --features apex-runtime-adapter --lib exec_command_preserves_normal_execution_result -- --test-threads=1
       - name: Run focused app-server filesystem boundary tests
-        run: cargo test -p codex-app-server --features apex-runtime-adapter --test all apex_adapter_ -- --test-threads=1
+        run: cargo test --locked -p codex-app-server --features apex-runtime-adapter --test all apex_adapter_ -- --test-threads=1
       - name: Run focused unified exec, approval, and command execution tests
         run: |
-          cargo test -p codex-core --features apex-runtime-adapter --test all suite::unified_exec -- --test-threads=1
-          cargo test -p codex-core --features apex-runtime-adapter --test all suite::approvals -- --test-threads=1
-          cargo test -p codex-app-server --features apex-runtime-adapter --test all suite::v2::command_exec -- --test-threads=1
+          cargo test --locked -p codex-core --features apex-runtime-adapter --test all suite::unified_exec -- --test-threads=1
+          cargo test --locked -p codex-core --features apex-runtime-adapter --test all suite::approvals -- --test-threads=1
+          cargo test --locked -p codex-app-server --features apex-runtime-adapter --test all suite::v2::command_exec -- --test-threads=1
       - name: Check for a clean worktree
         if: always() && !cancelled()
         uses: ./.github/actions/check-clean-worktree

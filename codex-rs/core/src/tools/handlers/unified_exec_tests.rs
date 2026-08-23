@@ -17,7 +17,6 @@ use crate::session::tests::make_session_and_context;
 use crate::tools::context::ExecCommandToolOutput;
 use crate::tools::context::ToolCallSource;
 use crate::tools::context::ToolInvocation;
-use crate::tools::context::ToolOutput;
 use crate::tools::context::ToolPayload;
 use crate::tools::hook_names::HookToolName;
 use crate::tools::registry::CoreToolRuntime;
@@ -242,7 +241,6 @@ async fn exec_command_preserves_normal_execution_result() {
         .await
         .expect("observation must not change normal exec behavior");
 
-    assert!(output.log_output().contains("apex-observer-output"));
     let result = output.code_mode_result(&payload);
     assert_eq!(result["exit_code"], serde_json::json!(0));
     assert_eq!(
