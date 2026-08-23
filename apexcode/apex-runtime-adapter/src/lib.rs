@@ -52,7 +52,7 @@ impl RuntimeActionRequest {
     /// Build a request for the one supported read-only action.
     pub fn read_file(request_id: impl Into<String>, path: impl Into<String>) -> Self {
         let (request_id, request_id_within_bound) =
-            bounded_text(request_id.into(), MAX_REQUEST_ID_BYTES);
+            bounded_secret_safe_text(request_id.into(), MAX_REQUEST_ID_BYTES);
         let (path, path_within_bound) = bounded_text(path.into(), MAX_PATH_BYTES);
         Self {
             request_id,
@@ -66,7 +66,7 @@ impl RuntimeActionRequest {
     /// Build a request for an action outside the adapter boundary.
     pub fn unsupported(request_id: impl Into<String>) -> Self {
         let (request_id, request_id_within_bound) =
-            bounded_text(request_id.into(), MAX_REQUEST_ID_BYTES);
+            bounded_secret_safe_text(request_id.into(), MAX_REQUEST_ID_BYTES);
         Self {
             request_id,
             request_id_within_bound,
@@ -207,6 +207,11 @@ fn bounded_text(value: String, limit: usize) -> (String, bool) {
         .last()
         .unwrap_or(0);
     (value[..end].to_string(), false)
+}
+
+fn bounded_secret_safe_text(value: String, limit: usize) -> (String, bool) {
+    let within_bound = value.len() <= limit;
+    (exec_classifier::sanitize_text(&value, limit), within_bound)
 }
 
 fn evaluate_classification(
@@ -413,5 +418,12 @@ mod tests {
         let debug = format!("{record:?}");
         assert!(!debug.contains("secret"));
         assert!(!debug.contains("contents"));
+    }
+
+    #[test]
+    fn gate_record_does_not_contain_secret_bearing_request_ids() {
+        let request = RuntimeActionRequest::unsupported("OPENAI_API_KEY=must-not-be-recorded");
+        let debug = format!("{:?}", GateDecision::evaluate(&request));
+        assert!(!debug.contains("must-not-be-recorded"));
     }
 }

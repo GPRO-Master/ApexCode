@@ -229,11 +229,11 @@ pub fn observe_exec_command(
     shell_name: &str,
 ) -> ExecObservation {
     let shell_kind = ExecShellKind::from_name(shell_name);
-    let request_id = exec_classifier::bounded_text(request_id.into(), MAX_REQUEST_ID_BYTES);
-    let cwd = exec_classifier::bounded_text(cwd.as_ref().to_string(), MAX_CWD_BYTES);
+    let request_id = exec_classifier::sanitize_text(&request_id.into(), MAX_REQUEST_ID_BYTES);
+    let cwd = exec_classifier::sanitize_text(cwd.as_ref(), MAX_CWD_BYTES);
     let executable = command
         .first()
-        .map(|value| exec_classifier::bounded_text(value.clone(), MAX_EXECUTABLE_BYTES))
+        .map(|value| exec_classifier::sanitize_text(value, MAX_EXECUTABLE_BYTES))
         .unwrap_or_default();
     let args = exec_classifier::sanitize_args(command.get(1..).unwrap_or(&[]));
     let (execution_mode, script) = exec_classifier::shell_script(command, shell_kind);

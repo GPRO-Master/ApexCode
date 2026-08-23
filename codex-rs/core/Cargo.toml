@@ -20,11 +20,7 @@ workspace = true
 
 [dependencies]
 anyhow = { workspace = true }
-apex-runtime-adapter = {
-    package = "apex-runtime-adapter",
-    path = "../../apexcode/apex-runtime-adapter",
-    optional = true,
-}
+apex-runtime-adapter = { package = "apex-runtime-adapter", path = "../../apexcode/apex-runtime-adapter", optional = true }
 arc-swap = { workspace = true }
 async-channel = { workspace = true }
 base64 = { workspace = true }

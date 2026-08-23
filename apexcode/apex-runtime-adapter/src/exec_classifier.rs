@@ -2,7 +2,6 @@ use super::ExecClassification;
 use super::ExecConfidence;
 use super::ExecExecutionMode;
 use super::ExecShellKind;
-use url::Url;
 
 const MAX_ARGUMENT_BYTES: usize = 512;
 const MAX_ARGUMENT_COUNT: usize = 64;
@@ -58,6 +57,12 @@ pub(super) fn classify_script(script: &str) -> (ExecClassification, ExecConfiden
     let normalized = script.trim().to_ascii_lowercase();
     if normalized.is_empty() {
         return unknown("empty shell script");
+    }
+    if normalized.contains(['\r', '\n']) {
+        return unknown("line-separated shell syntax requires deeper parsing");
+    }
+    if normalized.contains("<<") || normalized.contains("@\"") || normalized.contains("@'") {
+        return unknown("here-document syntax requires deeper parsing");
     }
 
     if contains_any(
@@ -188,13 +193,7 @@ fn is_known_read_only(command: &str) -> bool {
         "git" => tokens
             .get(1)
             .is_some_and(|token| matches!(*token, "status" | "diff" | "log" | "show")),
-        "cargo" => {
-            matches!(tokens.get(1), Some(&"test"))
-                || (tokens.get(1) == Some(&"fmt") && tokens.contains(&"--check"))
-        }
-        "composer" => tokens.get(1) == Some(&"test"),
-        "php" => tokens.get(1) == Some(&"artisan") && tokens.get(2) == Some(&"test"),
-        "npm" => tokens.get(1) == Some(&"test"),
+        "cargo" => tokens.get(1) == Some(&"fmt") && tokens.contains(&"--check"),
         _ => false,
     }
 }
@@ -204,6 +203,9 @@ fn contains_any(value: &str, needles: &[&str]) -> bool {
 }
 
 fn contains_unquoted_shell_operator(value: &str) -> bool {
+    if value.contains("$(") || value.contains(char::from(96)) {
+        return true;
+    }
     b"|;&()`"
         .iter()
         .copied()
@@ -235,34 +237,87 @@ fn contains_unquoted_operator(value: &str, operator: u8) -> bool {
 
 pub(super) fn sanitize_args(arguments: &[String]) -> Vec<String> {
     let mut total_bytes = 0;
-    arguments
-        .iter()
-        .take(MAX_ARGUMENT_COUNT)
-        .map(|argument| {
-            if total_bytes >= MAX_TOTAL_ARGUMENT_BYTES {
-                return "<truncated>".to_string();
-            }
-            let sanitized = sanitize_argument(argument);
-            total_bytes += sanitized.len();
-            bounded_text(sanitized, MAX_ARGUMENT_BYTES)
-        })
-        .collect()
+    let mut redact_next = false;
+    let mut sanitized_arguments = Vec::new();
+    for argument in arguments.iter().take(MAX_ARGUMENT_COUNT) {
+        if total_bytes >= MAX_TOTAL_ARGUMENT_BYTES {
+            break;
+        }
+        let sanitized = if redact_next
+            || is_sensitive_flag(argument)
+            || contains_sensitive_assignment(argument)
+            || contains_sensitive_flag_value(argument)
+            || contains_authorization_value(&argument.to_ascii_lowercase())
+            || contains_url_credentials(argument)
+            || contains_private_key_marker(&argument.to_ascii_lowercase())
+            || contains_opaque_secret(argument)
+        {
+            "<redacted-secret>".to_string()
+        } else {
+            sanitize_text(argument, MAX_ARGUMENT_BYTES)
+        };
+        let remaining_bytes = MAX_TOTAL_ARGUMENT_BYTES - total_bytes;
+        let sanitized = bounded_text(sanitized, remaining_bytes);
+        total_bytes += sanitized.len();
+        sanitized_arguments.push(sanitized);
+        redact_next = expects_sensitive_value(argument);
+    }
+    sanitized_arguments
 }
 
-fn sanitize_argument(argument: &str) -> String {
+pub(super) fn sanitize_text(argument: &str, limit: usize) -> String {
     let lower = argument.to_ascii_lowercase();
-    if contains_sensitive_assignment(argument)
+    let sanitized = if contains_sensitive_assignment(argument)
+        || contains_sensitive_flag_value(argument)
         || contains_authorization_value(&lower)
         || contains_url_credentials(argument)
         || contains_private_key_marker(&lower)
         || contains_opaque_secret(argument)
     {
-        return "<redacted-secret>".to_string();
-    }
-    bounded_text(argument.escape_debug().to_string(), MAX_ARGUMENT_BYTES)
+        "<redacted-secret>".to_string()
+    } else {
+        let bounded_argument = argument.chars().take(limit).collect::<String>();
+        bounded_argument.escape_debug().to_string()
+    };
+    bounded_text(sanitized, limit)
+}
+
+fn contains_sensitive_flag_value(argument: &str) -> bool {
+    let tokens = argument.split_whitespace().collect::<Vec<_>>();
+    tokens
+        .windows(2)
+        .any(|window| expects_sensitive_value(window[0]))
+}
+
+fn is_sensitive_flag(argument: &str) -> bool {
+    let argument = argument
+        .trim_matches(['\'', '"', '(', ')', '[', ']', ',', ';'])
+        .trim_start_matches('-');
+    !argument.contains('=') && is_sensitive_key(argument)
+}
+
+fn expects_sensitive_value(argument: &str) -> bool {
+    let normalized = argument
+        .trim_matches(['\'', '"', '(', ')', '[', ']', ',', ';'])
+        .to_ascii_lowercase();
+    matches!(normalized.as_str(), "-u" | "--user" | "-p" | "--password")
+        || is_sensitive_flag(argument)
 }
 
 fn contains_sensitive_assignment(argument: &str) -> bool {
+    argument.split_whitespace().any(|token| {
+        let Some((key, _)) = token.split_once('=') else {
+            return false;
+        };
+        let key = key
+            .trim_matches(['\'', '"', '(', ')', '[', ']', ',', ';'])
+            .trim_start_matches('-')
+            .to_ascii_lowercase();
+        is_sensitive_key(&key)
+    })
+}
+
+fn is_sensitive_key(key: &str) -> bool {
     const SENSITIVE_KEYS: &[&str] = &[
         "password",
         "pass",
@@ -277,15 +332,24 @@ fn contains_sensitive_assignment(argument: &str) -> bool {
         "access_token",
         "refresh_token",
         "auth_token",
+        "database_url",
+        "redis_url",
     ];
+    let key = key
+        .trim_matches(['\'', '"', '(', ')', '[', ']', ',', ';'])
+        .trim_start_matches('-')
+        .strip_prefix("$env:")
+        .unwrap_or(key)
+        .to_ascii_lowercase();
+    is_sensitive_key_with_list(&key, SENSITIVE_KEYS)
+        || key.ends_with("_key")
+        || key.ends_with("_token")
+        || key.ends_with("_secret")
+        || key.ends_with("_password")
+}
 
-    argument.split_whitespace().any(|token| {
-        let Some((key, _)) = token.split_once('=') else {
-            return false;
-        };
-        let key = key.trim_start_matches('-').to_ascii_lowercase();
-        SENSITIVE_KEYS.contains(&key.as_str())
-    })
+fn is_sensitive_key_with_list(key: &str, sensitive_keys: &[&str]) -> bool {
+    sensitive_keys.contains(&key)
 }
 
 fn contains_authorization_value(lower: &str) -> bool {
@@ -294,12 +358,24 @@ fn contains_authorization_value(lower: &str) -> bool {
 
 fn contains_url_credentials(argument: &str) -> bool {
     argument.split_whitespace().any(|token| {
-        let token = token.trim_matches(['\'', '"', '(', ')', '[', ']', ',', ';']);
-        let token = token.strip_prefix("--url=").unwrap_or(token);
-        Url::parse(token).is_ok_and(|url| {
-            matches!(url.scheme(), "http" | "https")
-                && (!url.username().is_empty() || url.password().is_some())
-        })
+        let token = token
+            .trim_matches(['\'', '"', '(', ')', '[', ']', ',', ';'])
+            .strip_prefix("--url=")
+            .unwrap_or(token);
+        let Some((scheme, remainder)) = token.split_once("://") else {
+            return false;
+        };
+        if scheme.is_empty()
+            || !scheme.chars().all(|character| {
+                character.is_ascii_alphanumeric() || matches!(character, '+' | '-' | '.')
+            })
+        {
+            return false;
+        }
+        let authority = remainder.split(['/', '?', '#']).next().unwrap_or_default();
+        authority
+            .split_once('@')
+            .is_some_and(|(userinfo, _)| userinfo.contains(':'))
     })
 }
 
