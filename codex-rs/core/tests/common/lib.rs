@@ -3,6 +3,7 @@
 use anyhow::Context as _;
 use anyhow::ensure;
 use codex_arg0::Arg0PathEntryGuard;
+use codex_sandboxing::landlock::CODEX_LINUX_SANDBOX_ARG0;
 use codex_utils_cargo_bin::CargoBinError;
 use ctor::ctor;
 use std::sync::OnceLock;
@@ -252,7 +253,9 @@ pub fn find_codex_linux_sandbox_exe() -> Result<PathBuf, CargoBinError> {
         return Ok(path);
     }
 
-    if let Ok(path) = std::env::current_exe() {
+    if let Ok(path) = std::env::current_exe()
+        && path.file_name().and_then(|name| name.to_str()) == Some(CODEX_LINUX_SANDBOX_ARG0)
+    {
         return Ok(path);
     }
 

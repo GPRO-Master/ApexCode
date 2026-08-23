@@ -81,6 +81,39 @@ jobs:
         if: always() && !cancelled()
         uses: ./.github/actions/check-clean-worktree
 
+  apex_focused_linux:
+    name: Apex focused Linux boundary validation
+    runs-on: ubuntu-24.04
+    needs: changed
+    if: ${{ needs.changed.outputs.codex == 'true' || needs.changed.outputs.apex == 'true' }}
+    defaults:
+      run:
+        working-directory: codex-rs
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-ci
+      - uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0
+      - name: Build repository-native Linux sandbox helper
+        run: cargo build -p codex-linux-sandbox
+      - name: Run Apex runtime adapter tests
+        run: cargo test -p apex-runtime-adapter --lib -- --test-threads=1
+      - name: Run feature-disabled execution preservation regression
+        run: cargo test -p codex-core --lib exec_command_preserves_normal_execution_result -- --test-threads=1
+      - name: Run feature-enabled observer boundary regression
+        run: cargo test -p codex-core --features apex-runtime-adapter --lib exec_command_preserves_normal_execution_result -- --test-threads=1
+      - name: Run focused app-server filesystem boundary tests
+        run: cargo test -p codex-app-server --features apex-runtime-adapter --test all apex_adapter_ -- --test-threads=1
+      - name: Run focused unified exec, approval, and command execution tests
+        run: |
+          cargo test -p codex-core --features apex-runtime-adapter --test all suite::unified_exec -- --test-threads=1
+          cargo test -p codex-core --features apex-runtime-adapter --test all suite::approvals -- --test-threads=1
+          cargo test -p codex-app-server --features apex-runtime-adapter --test all suite::v2::command_exec -- --test-threads=1
+      - name: Check for a clean worktree
+        if: always() && !cancelled()
+        uses: ./.github/actions/check-clean-worktree
+
   general:
     name: Format / etc
     runs-on: ubuntu-24.04
@@ -246,6 +279,7 @@ jobs:
       [
         changed,
         apex,
+        apex_focused_linux,
         general,
         cargo_shear,
         argument_comment_lint_package,
@@ -284,6 +318,10 @@ jobs:
 
           if [[ "${NEEDS_CHANGED_OUTPUTS_APEX}" == 'true' ]]; then
             [[ '${{ needs.apex.result }}' == 'success' ]] || { echo 'apex failed'; exit 1; }
+          fi
+
+          if [[ "${NEEDS_CHANGED_OUTPUTS_CODEX}" == 'true' || "${NEEDS_CHANGED_OUTPUTS_APEX}" == 'true' ]]; then
+            [[ '${{ needs.apex_focused_linux.result }}' == 'success' ]] || { echo 'apex_focused_linux failed'; exit 1; }
           fi
         env:
           NEEDS_CHANGED_OUTPUTS_ARGUMENT_COMMENT_LINT: ${{ needs.changed.outputs.argument_comment_lint }}

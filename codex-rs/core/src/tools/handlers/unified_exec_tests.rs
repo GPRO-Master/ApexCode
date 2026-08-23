@@ -226,27 +226,32 @@ async fn exec_command_rejects_login_when_selected_environment_disallows_it() {
     );
 }
 
-#[cfg(feature = "apex-runtime-adapter")]
 #[tokio::test]
-async fn exec_command_observer_preserves_normal_execution_result() {
-    let invocation = invocation_for_payload(
-        "exec_command",
-        "observer-exec-call",
-        ToolPayload::Function {
-            arguments: serde_json::json!({
-                "cmd": "ls",
-            })
-            .to_string(),
-        },
-    )
-    .await;
+async fn exec_command_preserves_normal_execution_result() {
+    let payload = ToolPayload::Function {
+        arguments: serde_json::json!({
+            "cmd": "echo apex-observer-output",
+        })
+        .to_string(),
+    };
+    let invocation =
+        invocation_for_payload("exec_command", "observer-exec-call", payload.clone()).await;
 
     let output = ExecCommandHandler::default()
         .handle(invocation)
         .await
         .expect("observation must not change normal exec behavior");
 
-    assert!(output.log_output().contains("Cargo.toml"));
+    assert!(output.log_output().contains("apex-observer-output"));
+    let result = output.code_mode_result(&payload);
+    assert_eq!(result["exit_code"], serde_json::json!(0));
+    assert_eq!(
+        result["output"]
+            .as_str()
+            .expect("execution result output should be text")
+            .trim_end_matches(['\r', '\n']),
+        "apex-observer-output"
+    );
 }
 
 #[test]
