@@ -23,6 +23,10 @@ use crate::tools::registry::CoreToolRuntime;
 use crate::tools::registry::ToolExecutor;
 use crate::turn_diff_tracker::TurnDiffTracker;
 #[cfg(target_os = "linux")]
+use codex_http_client::HttpClientFactory;
+#[cfg(target_os = "linux")]
+use codex_http_client::OutboundProxyPolicy;
+#[cfg(target_os = "linux")]
 use core_test_support::find_codex_linux_sandbox_exe;
 use tokio::sync::Mutex;
 
@@ -36,10 +40,38 @@ async fn invocation_for_payload(
     let (session, mut turn) = make_session_and_context().await;
     #[cfg(target_os = "linux")]
     {
-        let mut config = (*turn.config).clone();
-        config.codex_linux_sandbox_exe = Some(
-            find_codex_linux_sandbox_exe().expect("codex-linux-sandbox should be discoverable"),
+        let sandbox_helper =
+            find_codex_linux_sandbox_exe().expect("codex-linux-sandbox should be discoverable");
+        let runtime_paths = codex_exec_server::ExecServerRuntimePaths::new(
+            std::env::current_exe().expect("test executable should be discoverable"),
+            Some(sandbox_helper),
+        )
+        .expect("test runtime paths should be absolute");
+        let environment = Arc::new(
+            Environment::create(
+                None,
+                runtime_paths,
+                HttpClientFactory::new(OutboundProxyPolicy::ReqwestDefault),
+            )
+            .expect("test environment should use the repository-native sandbox helper"),
         );
+        let Some(TurnEnvironmentState::Ready(turn_environment)) =
+            turn.environments.environments.first_mut()
+        else {
+            panic!("primary test environment should be ready");
+        };
+        turn_environment.environment = environment;
+
+        let mut config = (*turn.config).clone();
+        config.codex_linux_sandbox_exe = turn_environment
+            .environment
+            .local_runtime_paths()
+            .and_then(|paths| {
+                paths
+                    .codex_linux_sandbox_exe
+                    .as_ref()
+                    .map(|path| path.to_path_buf())
+            });
         turn.config = Arc::new(config);
     }
     let turn = Arc::new(turn);
