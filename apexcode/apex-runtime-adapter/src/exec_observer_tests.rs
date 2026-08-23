@@ -192,6 +192,22 @@ fn diagnostics_redact_split_and_quoted_secret_assignments() {
 }
 
 #[test]
+fn diagnostics_redact_authorization_header_split_across_arguments() {
+    let command = vec![
+        "bash".to_string(),
+        "-c".to_string(),
+        "curl".to_string(),
+        "-H".to_string(),
+        "Authorization:".to_string(),
+        "Bearer".to_string(),
+        "low-entropy-secret".to_string(),
+    ];
+    let diagnostic = observe_exec_command("call-1", &command, "/repo", "bash").diagnostic_line();
+
+    assert!(!diagnostic.contains("low-entropy-secret"));
+}
+
+#[test]
 fn classifier_is_conservative_for_bypass_like_shapes() {
     for (shell, script, expected) in [
         (

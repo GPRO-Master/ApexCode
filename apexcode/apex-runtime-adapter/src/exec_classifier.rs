@@ -238,12 +238,15 @@ fn contains_unquoted_operator(value: &str, operator: u8) -> bool {
 pub(super) fn sanitize_args(arguments: &[String]) -> Vec<String> {
     let mut total_bytes = 0;
     let mut redact_next = false;
+    let mut authorization_values_remaining: usize = 0;
     let mut sanitized_arguments = Vec::new();
     for argument in arguments.iter().take(MAX_ARGUMENT_COUNT) {
         if total_bytes >= MAX_TOTAL_ARGUMENT_BYTES {
             break;
         }
+        let authorization_header = is_authorization_header_name(argument);
         let sanitized = if redact_next
+            || authorization_values_remaining > 0
             || is_sensitive_flag(argument)
             || contains_sensitive_assignment(argument)
             || contains_sensitive_flag_value(argument)
@@ -260,6 +263,10 @@ pub(super) fn sanitize_args(arguments: &[String]) -> Vec<String> {
         let sanitized = bounded_text(sanitized, remaining_bytes);
         total_bytes += sanitized.len();
         sanitized_arguments.push(sanitized);
+        authorization_values_remaining = authorization_values_remaining.saturating_sub(1);
+        if authorization_header {
+            authorization_values_remaining = 2;
+        }
         redact_next = expects_sensitive_value(argument);
     }
     sanitized_arguments
@@ -354,6 +361,16 @@ fn is_sensitive_key_with_list(key: &str, sensitive_keys: &[&str]) -> bool {
 
 fn contains_authorization_value(lower: &str) -> bool {
     lower.contains("authorization:") || lower.contains("bearer ")
+}
+
+fn is_authorization_header_name(argument: &str) -> bool {
+    matches!(
+        argument
+            .trim_matches(['\'', '"', '(', ')', '[', ']', ',', ';'])
+            .to_ascii_lowercase()
+            .as_str(),
+        "authorization" | "authorization:"
+    )
 }
 
 fn contains_url_credentials(argument: &str) -> bool {
